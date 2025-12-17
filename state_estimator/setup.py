@@ -28,7 +28,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            # executable_name = package_name.script_name:main
             'ekf_node = state_estimator.ekf_ros_node:main',
+            'gnss_node = state_estimator.gps_bridge:main',
+            'imu_bridge = state_estimator.imu_bridge:main',
         ],
     },
 )

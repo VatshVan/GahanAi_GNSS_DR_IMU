@@ -1,16 +1,1 @@
-ekf_node:
-  ros__parameters:
-    gps_topic: "/gps/fix"
-    imu_topic: "/imu/data_raw"
-    wheel_odom_topic: "/wheel_odom"
-    use_wheel_odom: false
-
-    # Process noise for [px, py, yaw, v]
-    Q_process: [0.5, 0.5, 0.02, 1.0]
-
-    # Measurement noise
-    R_gps: [5.0, 5.0]       # m^2
-    R_speed: 0.5            # (m/s)^2
-
-    # Initial covariance
-    initial_covariance: [10.0, 10.0, 0.5, 5.0]
+/home/vatshvan/GahanAi_GNSS_DR_IMU/state_estimator/build/state_estimator/config/ekf_params.yaml
