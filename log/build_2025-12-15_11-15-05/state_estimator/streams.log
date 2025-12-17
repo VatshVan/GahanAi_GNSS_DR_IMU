@@ -1,0 +1,21 @@
+[0.459s] Invoking command in '/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator': PYTHONPATH=/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/build --no-deps symlink_data --force
+[0.647s] running develop
+[0.763s] running egg_info
+[0.772s] writing state_estimator.egg-info/PKG-INFO
+[0.772s] writing dependency_links to state_estimator.egg-info/dependency_links.txt
+[0.772s] writing entry points to state_estimator.egg-info/entry_points.txt
+[0.772s] writing requirements to state_estimator.egg-info/requires.txt
+[0.772s] writing top-level names to state_estimator.egg-info/top_level.txt
+[0.790s] reading manifest file 'state_estimator.egg-info/SOURCES.txt'
+[0.790s] writing manifest file 'state_estimator.egg-info/SOURCES.txt'
+[0.799s] running build_ext
+[0.799s] Creating /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages/state-estimator.egg-link (link to .)
+[0.799s] Installing ekf_node script to /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/state_estimator
+[0.800s] 
+[0.800s] Installed /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator
+[0.800s] running symlink_data
+[0.800s] symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/resource/state_estimator -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/ament_index/resource_index/packages
+[0.800s] symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/package.xml -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator
+[0.800s] symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/launch/ekf_vehicle_launch.py -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator/launch
+[0.800s] symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/config/ekf_params.yaml -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator/config
+[0.820s] Invoked command in '/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator' returned '0': PYTHONPATH=/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/build --no-deps symlink_data --force

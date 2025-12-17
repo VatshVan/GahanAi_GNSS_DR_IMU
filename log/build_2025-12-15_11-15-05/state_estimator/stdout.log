@@ -1,0 +1,19 @@
+running develop
+running egg_info
+writing state_estimator.egg-info/PKG-INFO
+writing dependency_links to state_estimator.egg-info/dependency_links.txt
+writing entry points to state_estimator.egg-info/entry_points.txt
+writing requirements to state_estimator.egg-info/requires.txt
+writing top-level names to state_estimator.egg-info/top_level.txt
+reading manifest file 'state_estimator.egg-info/SOURCES.txt'
+writing manifest file 'state_estimator.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages/state-estimator.egg-link (link to .)
+Installing ekf_node script to /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/state_estimator
+
+Installed /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator
+running symlink_data
+symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/resource/state_estimator -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/ament_index/resource_index/packages
+symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/package.xml -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator
+symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/launch/ekf_vehicle_launch.py -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator/launch
+symbolically linking /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/config/ekf_params.yaml -> /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/share/state_estimator/config

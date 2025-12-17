@@ -1,0 +1,17 @@
+[0.416s] Invoking command in '/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator': PYTHONPATH=/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/build --no-deps symlink_data
+[0.614s] running develop
+[0.736s] running egg_info
+[0.745s] writing state_estimator.egg-info/PKG-INFO
+[0.746s] writing dependency_links to state_estimator.egg-info/dependency_links.txt
+[0.746s] writing entry points to state_estimator.egg-info/entry_points.txt
+[0.746s] writing requirements to state_estimator.egg-info/requires.txt
+[0.746s] writing top-level names to state_estimator.egg-info/top_level.txt
+[0.763s] reading manifest file 'state_estimator.egg-info/SOURCES.txt'
+[0.764s] writing manifest file 'state_estimator.egg-info/SOURCES.txt'
+[0.773s] running build_ext
+[0.773s] Creating /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages/state-estimator.egg-link (link to .)
+[0.773s] Installing ekf_node script to /home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/state_estimator
+[0.773s] 
+[0.774s] Installed /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator
+[0.774s] running symlink_data
+[0.793s] Invoked command in '/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator' returned '0': PYTHONPATH=/home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/vatshvan/GahanAi_GNSS_DR_IMU/install/state_estimator/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/vatshvan/GahanAi_GNSS_DR_IMU/build/state_estimator/build --no-deps symlink_data

@@ -1,0 +1,43 @@
+# ekf_node:
+#   ros__parameters:
+
+#     # ---- TOPICS (must match ekf_node.py) ----
+#     imu_topic: "/imu/diff"
+#     odom_topic: "/wheel_odom"
+#     gps_fix_topic: "/gps/fix"
+#     gps_speed_topic: "/gps/speed_mps"
+#     ekf_odom_topic: "/odometry/ekf"
+
+#     odom_frame_id: "odom"
+#     base_frame_id: "base_link"
+
+#     # ---- INITIAL COVARIANCE (px, py, yaw, v) ----
+#     initial_covariance: [10.0, 10.0, 0.5, 5.0]
+
+#     # ---- PROCESS NOISE (px, py, yaw, v) ----
+#     Q_process: [0.5, 0.5, 0.02, 1.0]
+
+#     # ---- MEASUREMENT NOISE ----
+#     R_gps: [5.0, 5.0]
+#     R_speed: 0.5
+
+
+ekf_node:
+  ros__parameters:
+
+    # ---- TOPICS (Must match the Python Code!) ----
+    imu_diff_topic: "/imu/diff"   # <--- CHANGED THIS FROM imu_topic
+    ekf_odom_topic: "/odometry/ekf"
+    
+    odom_frame: "odom"           # <--- CHANGED FROM odom_frame_id (matches my code)
+    base_frame: "base_link"      # <--- CHANGED FROM base_frame_id (matches my code)
+
+    # ---- INITIAL COVARIANCE (px, py, yaw, v) ----
+    initial_covariance: [10.0, 10.0, 0.5, 5.0]
+
+    # ---- PROCESS NOISE (px, py, yaw, v) ----
+    Q_process: [0.5, 0.5, 0.02, 1.0]
+
+    # ---- MEASUREMENT NOISE ----
+    R_gps: [5.0, 5.0]
+    R_speed: 0.5

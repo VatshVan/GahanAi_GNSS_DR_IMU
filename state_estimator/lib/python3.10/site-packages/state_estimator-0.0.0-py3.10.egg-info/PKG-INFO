@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: state-estimator
+Version: 0.0.0
+Summary: state estimator package
+Maintainer: sedrica
+Maintainer-email: sedrica@todo.todo
+License: TODO: License declaration
+Provides-Extra: test
