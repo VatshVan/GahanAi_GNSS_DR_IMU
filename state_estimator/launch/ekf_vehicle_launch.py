@@ -13,7 +13,7 @@ def generate_launch_description():
             executable='imu_bridge',
             name='imu_bridge_node',
             output='screen',
-            parameters=[{'port': '/dev/ttyUSB0', 'baud': 115200}]
+            parameters=[{'port': '/dev/ttyUSB1', 'baud': 115200}]
         ),
 
         # 2. GNSS BRIDGE
@@ -22,7 +22,7 @@ def generate_launch_description():
             executable='gnss_node',
             name='gnss_node',
             output='screen',
-            parameters=[{'port': '/dev/ttyUSB1', 'baud': 115200}]
+            parameters=[{'port': '/dev/ttyUSB0', 'baud': 115200}]
         ),
 
         # 3. EKF NODE

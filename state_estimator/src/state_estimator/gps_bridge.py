@@ -1,3 +1,41 @@
+"""
+GPS/GNSS Bridge Node for ROS 2 - GNSS Data Acquisition and ENU Localization
+This module implements a ROS 2 node that interfaces with GNSS receivers via serial communication,
+parses NMEA GGA sentences, and publishes both raw geodetic coordinates and local ENU (East-North-Up)
+frame positioning data. It provides RTK-aware covariance estimation and automatic local tangent plane
+initialization.
+Module: state_estimator.src.state_estimator.gps_bridge
+Classes:
+    GNSSNode: Main ROS 2 node for GNSS data acquisition and processing.
+Functions:
+    main(args=None): Entry point for the ROS 2 node execution.
+Key Features:
+    - Serial NMEA GGA sentence parsing with error handling
+    - Real-time NavSatFix publication (WGS84 geodetic coordinates)
+    - Local ENU frame conversion with automatic origin initialization
+    - RTK-aware covariance estimation (Fixed: 0.02m, Float: 0.5m, Standard: 2.5m)
+    - HDOP-scaled variance for adaptive position uncertainty
+    - Configurable serial port, baud rate, and frame identifiers via ROS 2 parameters
+    - Robust error handling for malformed NMEA sentences and serial communication failures
+Published Topics:
+    /gnss/fix (sensor_msgs/NavSatFix): Raw GNSS position in WGS84 geodetic coordinates
+    /gps/enu_pose (geometry_msgs/PoseWithCovarianceStamped): Local ENU frame position relative to origin
+Parameters:
+    port (str): Serial device path (default: '/dev/ttyUSB1')
+    baud (int): Serial baud rate (default: 115200)
+    frame_id (str): TF frame identifier for NavSatFix messages (default: 'gnss_link')
+Dependencies:
+    - rclpy: ROS 2 Python client library
+    - serial: PySerial for UART communication
+    - sensor_msgs: ROS 2 sensor message definitions
+    - geometry_msgs: ROS 2 geometry message definitions
+    - math: Standard library mathematics module
+Notes:
+    - ENU conversion assumes a local tangent plane approximation with origin set at first valid fix
+    - Covariance estimation is based on HDOP value and RTK quality indicator
+    - Serial reading operates at 100 Hz with non-blocking I/O (0.1s timeout)
+    - Z-component covariance set to 4x horizontal variance due to limited altitude reliability
+"""
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
@@ -11,7 +49,7 @@ class GNSSNode(Node):
         super().__init__('gnss_node')
 
         # --- CONFIGURATION ---
-        self.declare_parameter('port', '/dev/ttyUSB0')
+        self.declare_parameter('port', '/dev/ttyUSB1')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('frame_id', 'gnss_link')
         
@@ -46,7 +84,6 @@ class GNSSNode(Node):
         try:
             line = self.ser.readline().decode('utf-8', errors='replace').strip()
             
-            # CHANGED: Look for Standard NMEA "GGA" (Fix Data)
             if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
                 self.parse_gga(line)
                 
@@ -130,7 +167,7 @@ class GNSSNode(Node):
             self.origin_lon = lon
             self.origin_alt = alt
             self.has_origin = True
-            self.get_logger().info(f"📍 ORIGIN SET: {lat:.6f}, {lon:.6f}")
+            self.get_logger().info(f"ORIGIN SET: {lat:.6f}, {lon:.6f}")
             return
 
         # Simple Local Tangent Plane Conversion

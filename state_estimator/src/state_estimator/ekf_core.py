@@ -52,19 +52,48 @@ class EKF:
 
         # -------- Process Noise (Q) - UPDATED FOR REAL LIFE --------
         # Low values = High Inertia (Smooth). High values = Twitchy.
+
+        # -------- Process Noise (Q) - FINE TUNED --------
         self.Q = np.diag([
-            0.02,  # X: Position doesn't teleport
-            0.02,  # Y: Position doesn't teleport
-            0.01,  # Yaw: Robot can't snap-turn instantly
-            0.05,   # Velocity: Low variance (Smooth acceleration)
-            0.05    # Yaw Rate: Gyro bias drifts slowly
+            0.001,  # X: Very low (Smooth path)
+            0.001,  # Y: Very low
+            0.001,  # Yaw: No instant snap-turns
+            0.005,  # Velocity: VERY LOW (High Inertia/Mass) <--- CRITICAL CHANGE
+            0.01    # Yaw Rate: Gyro bias drifts slowly
         ])
 
         # -------- Yaw bootstrap --------
         self.is_yaw_initialized = False
         self.start_gps_x = None
         self.start_gps_y = None
-        self.min_align_distance = 1.5  # meters
+        self.min_align_distance = 4.0  # meters
+        self.last_gps_x = None
+        self.last_gps_y = None
+        self.last_gps_time = None
+        self.min_gps_heading_speed = 1.5  # m/s
+
+    def update_gps_heading(self, yaw_gps, var_yaw):
+        z = np.zeros(5)
+        z[self.YAW] = yaw_gps
+
+        R = np.zeros((5, 5))
+        R[self.YAW, self.YAW] = var_yaw
+
+        update_vector = [False, False, True, False, False]
+        self.correct(z, R, update_vector)
+    
+    def update_wheel_speed(self, v_meas, var_v):
+        """
+        Wheel odometry update: measures forward velocity only
+        """
+        z = np.zeros(5)
+        z[self.V] = v_meas
+
+        R = np.zeros((5, 5))
+        R[self.V, self.V] = var_v
+
+        update_vector = [False, False, False, True, False]
+        self.correct(z, R, update_vector)
 
     # -------------------------------------------------
     # Prediction
@@ -76,7 +105,7 @@ class EKF:
         yaw_new = normalize_angle(yaw + yaw_rate_meas * dt)
 
         v_new = v + accel_fwd * dt
-        v_new *= 0.99  # drag
+        # v_new *= 0.99  # drag
         v_new = np.clip(v_new, -5.0, 5.0)
 
         x_new = x + v * cos(yaw) * dt
@@ -169,22 +198,56 @@ class EKF:
     # -------------------------------------------------
     # GPS yaw bootstrap (same logic you already used)
     # -------------------------------------------------
-    def check_alignment(self, x_gps, y_gps):
+    # def check_alignment(self, x_gps, y_gps):
+    #     if self.start_gps_x is None:
+    #         self.start_gps_x = x_gps
+    #         self.start_gps_y = y_gps
+    #         return False
+
+    #     dx = x_gps - self.start_gps_x
+    #     dy = y_gps - self.start_gps_y
+    #     dist = sqrt(dx * dx + dy * dy)
+
+    #     if dist > self.min_align_distance:
+    #         heading = atan2(dy, dx)
+
+    #         self.state[self.YAW] = heading
+    #         self.state[self.X] = x_gps
+    #         self.state[self.Y] = y_gps
+
+    #         self.is_yaw_initialized = True
+    #         return True
+
+    #     return False
+
+    def check_alignment(self, x_gps, y_gps, current_time):
         if self.start_gps_x is None:
             self.start_gps_x = x_gps
             self.start_gps_y = y_gps
+            self.start_gps_time = current_time
             return False
 
         dx = x_gps - self.start_gps_x
         dy = y_gps - self.start_gps_y
         dist = sqrt(dx * dx + dy * dy)
 
+        # Wait for 4.0 meters to get a clean Heading
         if dist > self.min_align_distance:
+            # 1. Heading (This is still useful)
             heading = atan2(dy, dx)
 
-            self.state[self.YAW] = heading
+            # 2. Velocity - FORCE TO ZERO
+            # The GPS noise makes calculation here too dangerous (resulted in 5.0 m/s).
+            # We will let the update_wheel_speed() loop handle the speed up.
+            velocity = 0.0 
+
             self.state[self.X] = x_gps
             self.state[self.Y] = y_gps
+            self.state[self.YAW] = heading
+            self.state[self.V] = velocity
+            
+            # Tighter covariance for yaw, loose for velocity (since we guessed 0)
+            self.P = np.diag([0.5, 0.5, 0.1, 5.0, 0.1])
 
             self.is_yaw_initialized = True
             return True
@@ -200,7 +263,10 @@ class EKF:
         z[self.Y] = y_gps
 
         R = np.zeros((5, 5))
-        R_gps_2x2 *= 1.3
+
+        # This tells the EKF: "The IMU prediction is smoother than these GPS jumps."
+        R_gps_2x2 *= 4.0 
+        
         R[:2, :2] = R_gps_2x2
 
         update_vector = [True, True, False, False, False]
