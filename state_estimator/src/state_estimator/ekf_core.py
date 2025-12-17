@@ -9,7 +9,6 @@ Core Logic:
                This handles "Dead Reckoning" when GPS is lost.
     - UPDATE:  Fuses GPS [x, y] to correct position drift.
 """
-
 import numpy as np
 from collections import deque
 from math import sin, cos, atan2, sqrt, pi
@@ -50,7 +49,16 @@ class EKF:
 
         # -------- Covariances --------
         self.P = np.diag([1.0, 1.0, 0.1, 1.0, 0.1])
-        self.Q = np.diag([0.05, 0.05, 0.01, 0.5, 0.05])
+
+        # -------- Process Noise (Q) - UPDATED FOR REAL LIFE --------
+        # Low values = High Inertia (Smooth). High values = Twitchy.
+        self.Q = np.diag([
+            0.01,  # X: Position doesn't teleport
+            0.01,  # Y: Position doesn't teleport
+            0.001,  # Yaw: Robot can't snap-turn instantly
+            0.01,   # Velocity: Low variance (Smooth acceleration)
+            0.01    # Yaw Rate: Gyro bias drifts slowly
+        ])
 
         # -------- Yaw bootstrap --------
         self.is_yaw_initialized = False
@@ -59,7 +67,7 @@ class EKF:
         self.min_align_distance = 1.5  # meters
 
     # -------------------------------------------------
-    # Prediction (robot_localization-style EKF predict)
+    # Prediction
     # -------------------------------------------------
     def predict(self, accel_fwd, yaw_rate_meas, dt):
         x, y, yaw, v, yaw_rate = self.state
@@ -202,7 +210,6 @@ class EKF:
     # -------------------------------------------------
     def get_current_state(self):
         return self.state.copy()
-
 
 
 

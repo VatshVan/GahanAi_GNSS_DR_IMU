@@ -50,8 +50,8 @@ def simulate():
     # 2. Generate True Trajectory (Ground Truth)
     # ---------------------------------------------------------
     # We create a varying yaw rate and acceleration profile
-    true_omega = 0.08 * np.sin(0.1 * t) + 0.04 * np.sin(0.3 * t) + np.random.random(t_steps) * 0.01
-    true_acc   = 0.05 * np.cos(0.05 * t) + 0.02 * np.sin(0.2 * t) + np.random.random(t_steps) * 0.02
+    true_omega = 0.08 * np.sin(0.1 * t) + 0.04 * np.sin(0.3 * t)
+    true_acc   = 0.05 * np.cos(0.05 * t)
 
     # State: [x, y, yaw, v] (Note: Simulation uses 4 states for truth, EKF uses 5)
     x_true = np.zeros((t_steps, 4))
@@ -97,7 +97,7 @@ def simulate():
     ekf.P = np.diag([5.0, 5.0, 0.5, 2.0, 0.1])
 
     # Q: Process Noise (Trust in prediction)
-    ekf.Q = np.diag([
+    ekf.Q += np.diag([
         0.05,  # X
         0.05,  # Y
         0.01,  # Yaw
@@ -193,6 +193,7 @@ def simulate():
     ax3.legend()
 
     plt.tight_layout()
+    plt.savefig("ekf_trajectory.png")
 
     # Plot 4: Error Analysis
     fig2, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
@@ -209,6 +210,7 @@ def simulate():
     ax[1].grid(True)
     
     plt.tight_layout()
+    plt.savefig("ekf_simulation_results.png")
     plt.show()
 
 if __name__ == "__main__":
