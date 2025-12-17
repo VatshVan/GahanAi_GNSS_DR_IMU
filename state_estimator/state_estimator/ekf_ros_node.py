@@ -216,7 +216,7 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
-from math import sin, cos, degrees
+from math import sin, cos, degrees, atan2, sqrt
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 from nav_msgs.msg import Odometry
@@ -229,34 +229,23 @@ class EKF:
         # State Vector: [pos_x, pos_y, yaw, velocity, yaw_rate]
         self.state = np.zeros(5)
         
-        # --- COVARIANCE INITIALIZATION ---
-        # P: Initial Uncertainty.
-        self.P = np.diag([
-            1.0,   # x
-            1.0,   # y
-            0.1,   # yaw
-            1.0,   # velocity
-            0.1    # yaw_rate
-        ])
+        # COVARIANCE
+        self.P = np.diag([1.0, 1.0, 0.1, 1.0, 0.1])
+        self.Q = np.diag([0.05, 0.05, 0.01, 0.5, 0.05])
 
-        # Q: Process Noise (How much we trust the Physics/IMU prediction)
-        # Low values = Trust IMU Physics more. High values = Expect random jumps.
-        self.Q = np.diag([
-            0.05,  # x (0.05m jitter per sec)
-            0.05,  # y
-            0.01,  # yaw
-            0.5,   # velocity (High accel noise, rely on GPS to clamp speed)
-            0.05   # yaw_rate
-        ])
+        # --- INITIALIZATION STATE ---
+        self.is_yaw_initialized = False
+        self.start_gps_x = None
+        self.start_gps_y = None
+        self.min_align_distance = 1.5  # Meters to drive before aligning
 
     def predict_state(self, accel_fwd, yaw_rate, dt):
         x, y, yaw, v, omega = self.state
         
-        # --- 1. STATE PREDICTION (Physics) ---
+        # Physics Prediction
         new_yaw = yaw + yaw_rate * dt
         new_v = v + accel_fwd * dt
         new_v *= 0.99 # Drag
-        
         new_v = max(min(new_v, 5.0), -5.0)
 
         new_x = x + new_v * np.cos(yaw) * dt
@@ -264,7 +253,7 @@ class EKF:
         
         self.state = np.array([new_x, new_y, new_yaw, new_v, yaw_rate])
 
-        # --- 2. COVARIANCE PREDICTION ---
+        # Covariance Prediction
         F = np.eye(5)
         F[0, 2] = -v * np.sin(yaw) * dt
         F[0, 3] = np.cos(yaw) * dt
@@ -274,44 +263,56 @@ class EKF:
 
         self.P = F @ self.P @ F.T + (self.Q * dt)
 
+    def check_alignment(self, x_gps, y_gps):
+        """
+        Calculates initial heading based on the vector of motion.
+        Returns True if alignment was successful.
+        """
+        if self.start_gps_x is None:
+            self.start_gps_x = x_gps
+            self.start_gps_y = y_gps
+            return False
+
+        dx = x_gps - self.start_gps_x
+        dy = y_gps - self.start_gps_y
+        dist = sqrt(dx*dx + dy*dy)
+
+        # Wait until we have moved enough to get a clean vector
+        if dist > self.min_align_distance:
+            # Calculate the true heading from GPS motion
+            true_heading = atan2(dy, dx)
+            
+            # Update the State's Yaw immediately
+            self.state[2] = true_heading
+            
+            # Reset Position to match GPS exactly (snap to grid)
+            self.state[0] = x_gps
+            self.state[1] = y_gps
+            
+            self.is_yaw_initialized = True
+            return True
+        
+        return False
+
     def update_gps(self, z, R):
-        """
-        Corrects the predicted state using GNSS measurements.
-        z: Measurement vector [x_gps, y_gps] (2x1)
-        R: Measurement noise covariance matrix (2x2)
-        """
         # 1. Measurement Model (H)
-        # We measure Index 0 (x) and Index 1 (y) of the state directly.
-        # H maps State (5x1) -> Measurement (2x1)
         H = np.array([
             [1, 0, 0, 0, 0],
             [0, 1, 0, 0, 0]
         ])
 
-        # 2. Innovation (y)
-        # The difference between what GPS says and what we predicted
+        # 2. Innovation
         y = z - H @ self.state
-
-        # 3. Innovation Covariance (S)
-        # Total uncertainty = Prediction Uncertainty (P) + Measurement Noise (R)
         S = H @ self.P @ H.T + R
-
-        # 4. Kalman Gain (K)
-        # "Magic number": How much of the Innovation should we accept?
-        # If R is small (RTK), K is large -> We jump to GPS.
-        # If P is small (Confident Model), K is small -> We ignore GPS.
+        
         try:
             K = self.P @ H.T @ np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            return # Matrix singularity (rare), skip update
+            return
 
-        # 5. State Update
+        # 3. Update
         self.state = self.state + K @ y
-
-        # 6. Covariance Update
-        # We are now more certain, so P shrinks.
-        I = np.eye(5)
-        self.P = (I - K @ H) @ self.P
+        self.P = (np.eye(5) - K @ H) @ self.P
     
     def get_current_state(self): return self.state
 
@@ -335,46 +336,48 @@ class EKFNode(Node):
         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 50)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        self.get_logger().info("--- EKF ACTIVE: RTK-AWARE FUSION STARTED ---")
+        self.get_logger().info("--- EKF STARTED: Drive FORWARD 2 meters to align ---")
 
     def callback_pitch(self, msg): 
         self.current_pitch = msg.data
 
-    # --- GNSS CALLBACK (RTK LOGIC ADDED HERE) ---
     def callback_gnss(self, msg):
-        # --- 1. Extract Data ---
         x_gps = msg.pose.pose.position.x
         y_gps = msg.pose.pose.position.y
         z = np.array([x_gps, y_gps])
 
-        # Extract Variance (Diagonal of 6x6 covariance array)
-        # Index 0 = X Variance, Index 7 = Y Variance
         var_x = msg.pose.covariance[0]
         var_y = msg.pose.covariance[7]
 
-        # --- 2. GATING (The "Fix Type" Check) ---
-        # In gnss_node:
-        # Fix=0 -> Variance > 200 (Huge)
-        # Fix=3 (3D) -> Variance ~ 6.25
-        # Fix=6 (RTK) -> Variance ~ 0.0004
-        
-        # We ignore anything worse than a basic 3D Fix (Var ~20.0)
+        # REJECTION GATE
         if var_x > 20.0:
-            self.get_logger().warn(f"⚠️ REJECTING GPS (Low Confidence/No Fix): Var={var_x:.2f}", throttle_duration_sec=2.0)
+            self.get_logger().warn(f"⚠️ REJECTING GPS (Var: {var_x:.2f})")
             return
 
-        # --- 3. Build Matrices ---
-        R = np.array([
-            [var_x, 0.0],
-            [0.0, var_y]
-        ])
+        # --- INITIALIZATION LOGIC ---
+        if not self.ekf.is_yaw_initialized:
+            # We are in 'Calibration Mode'
+            if self.ekf.check_alignment(x_gps, y_gps):
+                self.get_logger().info(f"✅ YAW ALIGNED! Heading: {degrees(self.ekf.state[2]):.1f} deg")
+            else:
+                dist_moved = 0.0
+                if self.ekf.start_gps_x is not None:
+                     dx = x_gps - self.ekf.start_gps_x
+                     dy = y_gps - self.ekf.start_gps_y
+                     dist_moved = sqrt(dx*dx + dy*dy)
+                
+                self.get_logger().info(f"⏳ CALIBRATING: Drive Forward... ({dist_moved:.1f} / 1.5m)", throttle_duration_sec=1.0)
+            
+            # During calibration, we do NOT run the EKF Update step.
+            # We just gather data.
+            return
 
-        # --- 4. EXECUTE UPDATE ---
+        # --- NORMAL OPERATION ---
+        R = np.array([[var_x, 0.0], [0.0, var_y]])
         self.ekf.update_gps(z, R)
         
-        # Log for debugging
         status = "RTK FIXED" if var_x < 0.01 else ("RTK FLOAT" if var_x < 1.0 else "3D FIX")
-        self.get_logger().info(f"🛰️ GPS UPDATE [{status}] | Error: {x_gps - self.ekf.state[0]:.2f}m", throttle_duration_sec=2.0)
+        self.get_logger().info(f"🛰️ UPDATE [{status}] | Pos: {x_gps:.1f}, {y_gps:.1f}", throttle_duration_sec=2.0)
 
     def callback_imu_diff(self, msg: Imu):
         current_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -384,24 +387,20 @@ class EKFNode(Node):
         self.last_msg_time = current_time_sec
         if dt <= 0: return
 
-        # Unpack
         accel_fwd_raw = msg.linear_acceleration.x
         yaw_rate      = msg.angular_velocity.z
         
-        # Physics Correction
         gravity_vector_x = 9.81 * sin(self.current_pitch) 
         accel_gravity_corrected = accel_fwd_raw + gravity_vector_x 
         accel_centrifugal = (yaw_rate ** 2) * self.ROTATION_RADIUS
         accel_linear_net = accel_gravity_corrected - accel_centrifugal
 
-        # Motion Logic (ZUPT)
         accel_final = accel_linear_net
         if abs(accel_final) < 0.15: 
             accel_final = 0.0
             self.ekf.state[3] *= 0.8 
             if abs(self.ekf.state[3]) < 0.05: self.ekf.state[3] = 0.0
 
-        # EKF Prediction
         self.ekf.predict_state(accel_final, yaw_rate, dt)
         self.publish_odometry(msg.header.stamp)
 
