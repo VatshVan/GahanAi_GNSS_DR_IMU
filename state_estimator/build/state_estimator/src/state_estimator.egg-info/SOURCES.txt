@@ -8,6 +8,8 @@ src/state_estimator/ekf_ros_node.py
 src/state_estimator/ekf_sim.py
 src/state_estimator/gps_bridge.py
 src/state_estimator/imu_bridge.py
+src/state_estimator/sim_gps_bridge.py
+src/state_estimator/sim_imu_bridge.py
 src/state_estimator/virtual_car.py
 src/state_estimator.egg-info/PKG-INFO
 src/state_estimator.egg-info/SOURCES.txt

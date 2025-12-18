@@ -308,7 +308,7 @@ class DataLogger(Node):
         # Resample EKF to match Truth length if slightly different due to callback timing
         min_len = min(len(truth), len(ekf))
         ax[1].plot(ekf[:min_len, 2], 'b--', label='EKF Speed')
-        ax[1].set_ylim(0, 4)
+        # ax[1].set_ylim(0, 4)
         ax[1].grid(True)
         ax[1].legend()
 
