@@ -229,35 +229,45 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 import sys
 
 class DataLogger(Node):
     def __init__(self):
         super().__init__('data_logger')
         
-        # Buffers
+        # Buffers: [x, y, v, yaw, yaw_rate]
         self.history_true = []
         self.history_ekf = []
+        # Buffer: [x, y]
         self.history_gps = []
         
         self.counter = 0
-        self.limit = 4500
+        self.limit = 5000  # Set duration of logging
 
-        # Subscribe to EKF and Sim
+        # Subscribe to EKF, Ground Truth, and GPS
         self.create_subscription(Odometry, '/ground_truth', self.cb_true, 10)
         self.create_subscription(Odometry, '/odometry/ekf', self.cb_ekf, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.cb_gps, 10)
 
-        self.get_logger().info("📊 LOGGER READY. Waiting for data...")
+        self.get_logger().info("📊 COMPREHENSIVE LOGGER READY. Waiting for data...")
+
+    def get_yaw(self, q):
+        """Convert Quaternion to Yaw (Z-axis rotation)"""
+        # atan2(2(wz + xy), 1 - 2(ysq + zsq))
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def cb_true(self, msg):
+        yaw = self.get_yaw(msg.pose.pose.orientation)
         self.history_true.append([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            msg.twist.twist.linear.x
+            msg.pose.pose.position.x,      # 0: X
+            msg.pose.pose.position.y,      # 1: Y
+            msg.twist.twist.linear.x,      # 2: Velocity
+            yaw,                           # 3: Yaw
+            msg.twist.twist.angular.z      # 4: Yaw Rate
         ])
         
-        # Check termination
+        # Check termination based on Truth messages
         self.counter += 1
         if self.counter % 500 == 0:
             self.get_logger().info(f"Collected {self.counter}/{self.limit} steps...")
@@ -266,10 +276,13 @@ class DataLogger(Node):
             self.plot_and_quit()
 
     def cb_ekf(self, msg):
+        yaw = self.get_yaw(msg.pose.pose.orientation)
         self.history_ekf.append([
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
-            msg.twist.twist.linear.x
+            msg.twist.twist.linear.x,
+            yaw,
+            msg.twist.twist.angular.z
         ])
 
     def cb_gps(self, msg):
@@ -279,8 +292,9 @@ class DataLogger(Node):
         ])
 
     def plot_and_quit(self):
-        self.get_logger().info("✅ DONE! Generating Plots...")
+        self.get_logger().info("✅ DONE! Generating Comprehensive Plots...")
         
+        # Convert to numpy arrays
         truth = np.array(self.history_true)
         ekf = np.array(self.history_ekf)
         gps = np.array(self.history_gps)
@@ -289,36 +303,98 @@ class DataLogger(Node):
             self.get_logger().error("NO EKF DATA RECEIVED! Check your nodes.")
             sys.exit(1)
 
-        # PLOTTING
-        fig, ax = plt.subplots(1, 2, figsize=(15, 6))
-
-        # 1. Trajectory
-        ax[0].set_title(f"ROS 2 EKF Trajectory ({self.limit} steps)")
-        ax[0].plot(truth[:,0], truth[:,1], 'k-', lw=2, label='Ground Truth')
-        ax[0].plot(ekf[:,0], ekf[:,1], 'b--', lw=2, label='EKF Output')
-        if len(gps) > 0:
-            ax[0].scatter(gps[:,0], gps[:,1], c='r', s=5, alpha=0.3, label='GPS Input')
-        ax[0].legend()
-        ax[0].axis('equal')
-        ax[0].grid(True)
-
-        # 2. Velocity
-        ax[1].set_title("Velocity Estimate")
-        ax[1].plot(truth[:,2], 'k-', label='True Speed')
-        # Resample EKF to match Truth length if slightly different due to callback timing
+        # Sync lengths (EKF might be slightly behind Truth)
         min_len = min(len(truth), len(ekf))
-        ax[1].plot(ekf[:min_len, 2], 'b--', label='EKF Speed')
-        # ax[1].set_ylim(0, 4)
-        ax[1].grid(True)
-        ax[1].legend()
+        truth = truth[:min_len]
+        ekf = ekf[:min_len]
+        steps = np.arange(min_len)
 
-        plt.tight_layout()
-        filename = "ros_ekf_results.png"
+        # --- CALCULATE ERRORS ---
+        # Position Error (Euclidean Distance)
+        pos_error = np.sqrt((truth[:,0] - ekf[:,0])**2 + (truth[:,1] - ekf[:,1])**2)
+        # Velocity Error
+        vel_error = truth[:,2] - ekf[:,2]
+        # Yaw Error (Wrapped)
+        yaw_error = np.arctan2(np.sin(truth[:,3] - ekf[:,3]), np.cos(truth[:,3] - ekf[:,3]))
+
+        # --- PLOTTING SETUP (4 Rows x 2 Columns) ---
+        fig, ax = plt.subplots(4, 2, figsize=(16, 20))
+        plt.subplots_adjust(hspace=0.4)
+
+        # 1. Trajectory (XY Plane)
+        ax[0, 0].set_title("1. 2D Trajectory (XY Plane)")
+        ax[0, 0].plot(truth[:,0], truth[:,1], 'k-', lw=2, label='Ground Truth')
+        ax[0, 0].plot(ekf[:,0], ekf[:,1], 'b--', lw=2, label='EKF Est')
+        if len(gps) > 0:
+            ax[0, 0].scatter(gps[:,0], gps[:,1], c='r', s=5, alpha=0.3, label='GPS Raw')
+        ax[0, 0].set_xlabel("X [m]")
+        ax[0, 0].set_ylabel("Y [m]")
+        ax[0, 0].axis('equal')
+        ax[0, 0].grid(True)
+        ax[0, 0].legend()
+
+        # 2. Position Error (Total)
+        ax[0, 1].set_title("2. Total Position Error (Euclidean)")
+        ax[0, 1].plot(steps, pos_error, 'r-', lw=1)
+        ax[0, 1].set_xlabel("Step")
+        ax[0, 1].set_ylabel("Error [m]")
+        ax[0, 1].grid(True)
+        ax[0, 1].fill_between(steps, pos_error, color='r', alpha=0.1)
+
+        # 3. X Position vs Time
+        ax[1, 0].set_title("3. X Position vs Time")
+        ax[1, 0].plot(steps, truth[:,0], 'k-', label='True')
+        ax[1, 0].plot(steps, ekf[:,0], 'b--', label='EKF')
+        ax[1, 0].set_ylabel("X [m]")
+        ax[1, 0].grid(True)
+        ax[1, 0].legend()
+
+        # 4. Y Position vs Time
+        ax[1, 1].set_title("4. Y Position vs Time")
+        ax[1, 1].plot(steps, truth[:,1], 'k-', label='True')
+        ax[1, 1].plot(steps, ekf[:,1], 'b--', label='EKF')
+        ax[1, 1].set_ylabel("Y [m]")
+        ax[1, 1].grid(True)
+        ax[1, 1].legend()
+
+        # 5. Velocity vs Time
+        ax[2, 0].set_title("5. Velocity Estimate")
+        ax[2, 0].plot(steps, truth[:,2], 'k-', label='True')
+        ax[2, 0].plot(steps, ekf[:,2], 'b--', label='EKF')
+        ax[2, 0].set_ylabel("Speed [m/s]")
+        ax[2, 0].grid(True)
+        ax[2, 0].legend()
+
+        # 6. Velocity Error
+        ax[2, 1].set_title("6. Velocity Error")
+        ax[2, 1].plot(steps, vel_error, 'g-', lw=1)
+        ax[2, 1].set_ylabel("Error [m/s]")
+        ax[2, 1].grid(True)
+        ax[2, 1].axhline(0, color='k', linestyle=':', alpha=0.5)
+
+        # 7. Yaw Angle (Heading)
+        ax[3, 0].set_title("7. Heading (Yaw) Angle")
+        ax[3, 0].plot(steps, np.degrees(truth[:,3]), 'k-', label='True')
+        ax[3, 0].plot(steps, np.degrees(ekf[:,3]), 'b--', label='EKF')
+        ax[3, 0].set_ylabel("Yaw [deg]")
+        ax[3, 0].set_xlabel("Step")
+        ax[3, 0].grid(True)
+        ax[3, 0].legend()
+
+        # 8. Yaw Rate (Angular Velocity)
+        ax[3, 1].set_title("8. Yaw Rate (Z-Gyro)")
+        ax[3, 1].plot(steps, truth[:,4], 'k-', label='True')
+        ax[3, 1].plot(steps, ekf[:,4], 'b--', label='EKF')
+        ax[3, 1].set_ylabel("Rate [rad/s]")
+        ax[3, 1].set_xlabel("Step")
+        ax[3, 1].grid(True)
+        ax[3, 1].legend()
+
+        filename = "ros_ekf_comprehensive.png"
         plt.savefig(filename)
-        self.get_logger().info(f"💾 SAVED PLOT TO: {filename}")
+        self.get_logger().info(f"💾 SAVED 8-PLOT GRID TO: {filename}")
         
-        # Kill python
-        plt.show() # Optional: Blocks until closed
+        plt.show()
         sys.exit(0)
 
 def main(args=None):

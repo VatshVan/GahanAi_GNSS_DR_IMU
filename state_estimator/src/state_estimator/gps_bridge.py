@@ -68,6 +68,11 @@ class GNSSNode(Node):
         self.has_origin = False
         self.EARTH_RADIUS = 6378137.0 
 
+        self.declare_parameter('use_saved_origin', True)
+        self.declare_parameter('origin_lat', 0.0)
+        self.declare_parameter('origin_lon', 0.0)
+        self.declare_parameter('origin_alt', 0.0)
+
         # --- SERIAL CONNECTION ---
         self.ser = None
         try:
@@ -75,6 +80,25 @@ class GNSSNode(Node):
             self.get_logger().info(f"Connected to GNSS on {port} @ {baud}")
         except Exception as e:
             self.get_logger().error(f"Serial Connection Failed: {e}")
+
+                # --- LOAD SAVED ORIGIN IF AVAILABLE ---
+        use_saved = self.get_parameter('use_saved_origin').value
+
+        if use_saved:
+            lat0 = self.get_parameter('origin_lat').value
+            lon0 = self.get_parameter('origin_lon').value
+            alt0 = self.get_parameter('origin_alt').value
+
+            if lat0 != 0.0 and lon0 != 0.0:
+                self.origin_lat = lat0
+                self.origin_lon = lon0
+                self.origin_alt = alt0
+                self.has_origin = True
+
+                self.get_logger().info(
+                    f"Loaded saved ENU origin: "
+                    f"{lat0:.6f}, {lon0:.6f}, {alt0:.2f}"
+                )
 
         self.create_timer(0.01, self.read_serial_data)
 
@@ -145,6 +169,8 @@ class GNSSNode(Node):
         if quality == 4: base_error = 0.02 # RTK Fixed
         elif quality == 5: base_error = 0.5 # RTK Float
         variance = (hdop * base_error) ** 2
+        if quality < 4:  # non-RTK
+            variance *= 3.0
 
         # --- 1. PUBLISH RAW FIX ---
         msg = NavSatFix()
