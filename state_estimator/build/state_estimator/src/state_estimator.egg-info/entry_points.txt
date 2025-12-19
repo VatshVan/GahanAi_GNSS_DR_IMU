@@ -1,4 +1,0 @@
-[console_scripts]
-ekf_node = state_estimator.ekf_ros_node:main
-gnss_node = state_estimator.gps_bridge:main
-imu_bridge = state_estimator.imu_bridge:main
