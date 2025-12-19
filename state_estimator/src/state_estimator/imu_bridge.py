@@ -1,53 +1,3 @@
-"""
-IMU Bridge Node for Differential IMU Sensor Data Processing and ROS2 Integration.
-This module implements a ROS2 node that reads dual-IMU sensor data via serial connection,
-performs calibration, bias correction, and complementary filtering to produce orientation
-estimates and sensor measurements suitable for downstream state estimation (e.g., Extended
-Kalman Filter). The node publishes standard ROS2 Imu messages with covariance matrices
-and debug topics for pitch/roll angles.
-Module: state_estimator.src.state_estimator.imu_bridge
-Classes:
-    DiffIMUBridge: ROS2 Node managing dual-IMU data acquisition, processing, and publication.
-Key Features:
-    - Dual-IMU support with independent bias calibration for each sensor
-    - Automatic zero-velocity bias calibration during startup (3 seconds)
-    - Complementary filtering (98% gyro integration + 2% accelerometer correction)
-    - Differential acceleration measurement between left/right IMU units
-    - Euler angle to quaternion conversion for orientation representation
-    - Configurable covariance matrices for Bayesian filtering integration
-    - Serial communication with configurable baud rate and timeout
-    - ROS2 standard Imu message publishing with frame_id="imu_link"
-    - Debug topics for real-time pitch and roll angle monitoring
-Publishers:
-    /imu/diff (sensor_msgs/Imu): Primary IMU data with orientation, acceleration, and angular velocity
-    /imu/pitch (std_msgs/Float32): Filtered pitch angle in radians (debug topic)
-    /imu/roll (std_msgs/Float32): Filtered roll angle in radians (debug topic)
-Calibration Strategy:
-    Performs zero-velocity calibration by averaging 300+ sensor samples (~3 seconds at 100Hz)
-    collected during vehicle standstill. Bias vectors are computed for all four sensor streams
-    (accel_left, gyro_left, accel_right, gyro_right) and subtracted from measurements.
-    Vertical acceleration bias components are zeroed to preserve gravity reference.
-Complementary Filter:
-    Employs 98% gyroscopic integration with 2% accelerometer correction to estimate
-    pitch/roll angles. Mitigates gyroscope drift while reducing accelerometer noise sensitivity.
-    Yaw estimation is not performed (delegated to GNSS/EKF modules).
-Covariance Configuration:
-    Empirically calibrated noise parameters representing sensor uncertainty:
-    - Accelerometer variance: 0.0025 (m/s²)²
-    - Gyroscope variance: 0.0004 (rad/s)²
-    - Orientation variance: 0.001 (rad)²
-Serial Protocol:
-    Expected input format: "ax_l,ay_l,az_l,gx_l,gy_l,gz_l,ax_r,ay_r,az_r,gx_r,gy_r,gz_r"
-    where suffixes _l and _r denote left and right IMU units respectively.
-    Units: Acceleration in m/s², angular velocity in degrees/second.
-Dependencies:
-    - rclpy (ROS2 Python client library)
-    - sensor_msgs.msg (ROS2 standard message types)
-    - pyserial (serial port communication)
-    - numpy (numerical computations)
-Typical Usage:
-    $ ros2 run state_estimator imu_bridge --ros-args -p port:=/dev/ttyUSB0 -p baud:=115200
-"""
 #!/usr/bin/env python3
 import sys
 import serial
@@ -55,18 +5,30 @@ import math
 import rclpy
 import numpy as np
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy # <--- REQUIRED
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Quaternion
 
 class DiffIMUBridge(Node):
-    def __init__(self, port='/dev/ttyUSB1', baud=115200):
+    def __init__(self, port='/dev/ttyUSB0', baud=115200):
         super().__init__('diff_imu_bridge')
 
+        # --- QOS PROFILE (CRITICAL FIX) ---
+        # Must match EKF's "Best Effort" expectation
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
         # --- PUBLISHERS ---
-        self.pub_imu_diff = self.create_publisher(Imu, '/imu/diff', 10)
-        self.pub_pitch    = self.create_publisher(Float32, '/imu/pitch', 10)
-        self.pub_roll     = self.create_publisher(Float32, '/imu/roll', 10)
+        # CHANGED: Topic name to /imu/data_raw to match EKF
+        # CHANGED: Added qos_profile=sensor_qos
+        self.pub_imu_diff = self.create_publisher(Imu, '/imu/data_raw', sensor_qos)
+        self.pub_pitch    = self.create_publisher(Float32, '/imu/pitch', sensor_qos)
+        self.pub_roll     = self.create_publisher(Float32, '/imu/roll', sensor_qos)
 
         # --- SERIAL CONNECTION ---
         self.serial_port = None
@@ -90,38 +52,17 @@ class DiffIMUBridge(Node):
         self.roll_filtered  = 0.0
         self.last_timestamp = self.get_clock().now()
 
-        # --- COVARIANCE CONSTANTS (The "Trust" Math) ---
-        # Values are variances (standard deviation squared)
-        
-        # 1. Accelerometer Noise: ~0.05 m/s^2 error
+        # --- COVARIANCE ---
         ACCEL_COV = 0.0025 
-        
-        # 2. Gyro Noise: ~0.02 rad/s error
         GYRO_COV = 0.0004 
-        
-        # 3. Orientation Noise: Filtered pitch/roll is fairly accurate
         ORIENT_COV = 0.001 
 
-        self.linear_accel_cov = [
-            ACCEL_COV, 0.0, 0.0,
-            0.0, ACCEL_COV, 0.0,
-            0.0, 0.0, ACCEL_COV
-        ]
-
-        self.angular_vel_cov = [
-            GYRO_COV, 0.0, 0.0,
-            0.0, GYRO_COV, 0.0,
-            0.0, 0.0, GYRO_COV
-        ]
-        
-        self.orientation_cov = [
-            ORIENT_COV, 0.0, 0.0,
-            0.0, ORIENT_COV, 0.0,
-            0.0, 0.0, ORIENT_COV
-        ]
+        self.linear_accel_cov = [ACCEL_COV, 0., 0., 0., ACCEL_COV, 0., 0., 0., ACCEL_COV]
+        self.angular_vel_cov = [GYRO_COV, 0., 0., 0., GYRO_COV, 0., 0., 0., GYRO_COV]
+        self.orientation_cov = [ORIENT_COV, 0., 0., 0., ORIENT_COV, 0., 0., 0., ORIENT_COV]
 
         self.create_timer(0.01, self.read_serial_data)
-        self.get_logger().info("KEEP VEHICLE STILL! Calibrating (3s)...")
+        self.get_logger().info("⚖️  DUAL IMU BRIDGE STARTED. Keep still for Calibration...")
 
     def read_serial_data(self):
         if self.serial_port is None: return
@@ -155,7 +96,7 @@ class DiffIMUBridge(Node):
                     
                     self.is_calibrated = True
                     self.last_timestamp = self.get_clock().now()
-                    self.get_logger().info("CALIBRATION COMPLETE.")
+                    self.get_logger().info("✅ CALIBRATION COMPLETE.")
                 return
 
             # --- 2. BIAS CORRECTION ---
@@ -164,6 +105,7 @@ class DiffIMUBridge(Node):
             accel_right -= self.bias_accel_right
             gyro_right  -= self.bias_gyro_right 
             
+            # AVERAGE THE TWO SENSORS (Noise Reduction)
             accel_avg = (accel_left + accel_right) / 2.0
             gyro_avg  = (gyro_left + gyro_right) / 2.0
 
@@ -183,33 +125,32 @@ class DiffIMUBridge(Node):
             self.pitch_filtered = alpha * (self.pitch_filtered + pitch_rate * dt) + (1.0 - alpha) * pitch_accel
             self.roll_filtered  = alpha * (self.roll_filtered  + roll_rate * dt)  + (1.0 - alpha) * roll_accel
 
-            # --- 4. PUBLISH STANDARD IMU MESSAGE ---
+            # --- 4. PUBLISH ---
             imu_msg = Imu()
             imu_msg.header.stamp = current_ros_time.to_msg()
             imu_msg.header.frame_id = "imu_link"
             
-            # A. DATA
+            # Data
             imu_msg.linear_acceleration.x = accel_avg[0]
-            imu_msg.linear_acceleration.y = accel_left[0] - accel_right[0] # Diff Accel
-            imu_msg.linear_acceleration.z = accel_avg[2] # Gravity + Vertical
+            imu_msg.linear_acceleration.y = accel_avg[1]
+            imu_msg.linear_acceleration.z = accel_avg[2]
 
             imu_msg.angular_velocity.x = math.radians(gyro_avg[0])
             imu_msg.angular_velocity.y = math.radians(gyro_avg[1])
-            imu_msg.angular_velocity.z = math.radians(gyro_avg[2]) # Yaw Rate
+            imu_msg.angular_velocity.z = math.radians(gyro_avg[2]) # <--- EKF USES THIS
 
-            # B. ORIENTATION (Quaternion from Pitch/Roll)
-            # We assume Yaw = 0.0 here because Bridge doesn't track absolute heading (GNSS/EKF does that)
+            # Orientation
             q = self.euler_to_quaternion(self.roll_filtered, self.pitch_filtered, 0.0)
             imu_msg.orientation = q
 
-            # C. COVARIANCE (Crucial for EKF)
+            # Covariance
             imu_msg.linear_acceleration_covariance = self.linear_accel_cov
             imu_msg.angular_velocity_covariance    = self.angular_vel_cov
             imu_msg.orientation_covariance         = self.orientation_cov
             
             self.pub_imu_diff.publish(imu_msg)
 
-            # Publish Debug Topics
+            # Debug
             p = Float32(); p.data = self.pitch_filtered
             r = Float32(); r.data = self.roll_filtered
             self.pub_pitch.publish(p)

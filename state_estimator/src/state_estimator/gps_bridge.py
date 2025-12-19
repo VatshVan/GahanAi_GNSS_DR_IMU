@@ -1,48 +1,12 @@
-"""
-GPS/GNSS Bridge Node for ROS 2 - GNSS Data Acquisition and ENU Localization
-This module implements a ROS 2 node that interfaces with GNSS receivers via serial communication,
-parses NMEA GGA sentences, and publishes both raw geodetic coordinates and local ENU (East-North-Up)
-frame positioning data. It provides RTK-aware covariance estimation and automatic local tangent plane
-initialization.
-Module: state_estimator.src.state_estimator.gps_bridge
-Classes:
-    GNSSNode: Main ROS 2 node for GNSS data acquisition and processing.
-Functions:
-    main(args=None): Entry point for the ROS 2 node execution.
-Key Features:
-    - Serial NMEA GGA sentence parsing with error handling
-    - Real-time NavSatFix publication (WGS84 geodetic coordinates)
-    - Local ENU frame conversion with automatic origin initialization
-    - RTK-aware covariance estimation (Fixed: 0.02m, Float: 0.5m, Standard: 2.5m)
-    - HDOP-scaled variance for adaptive position uncertainty
-    - Configurable serial port, baud rate, and frame identifiers via ROS 2 parameters
-    - Robust error handling for malformed NMEA sentences and serial communication failures
-Published Topics:
-    /gnss/fix (sensor_msgs/NavSatFix): Raw GNSS position in WGS84 geodetic coordinates
-    /gps/enu_pose (geometry_msgs/PoseWithCovarianceStamped): Local ENU frame position relative to origin
-Parameters:
-    port (str): Serial device path (default: '/dev/ttyUSB1')
-    baud (int): Serial baud rate (default: 115200)
-    frame_id (str): TF frame identifier for NavSatFix messages (default: 'gnss_link')
-Dependencies:
-    - rclpy: ROS 2 Python client library
-    - serial: PySerial for UART communication
-    - sensor_msgs: ROS 2 sensor message definitions
-    - geometry_msgs: ROS 2 geometry message definitions
-    - math: Standard library mathematics module
-Notes:
-    - ENU conversion assumes a local tangent plane approximation with origin set at first valid fix
-    - Covariance estimation is based on HDOP value and RTK quality indicator
-    - Serial reading operates at 100 Hz with non-blocking I/O (0.1s timeout)
-    - Z-component covariance set to 4x horizontal variance due to limited altitude reliability
-"""
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import serial
 import math
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from std_msgs.msg import Float32 # <--- REQUIRED FOR SPEED
 
 class GNSSNode(Node):
     def __init__(self):
@@ -57,9 +21,19 @@ class GNSSNode(Node):
         baud = self.get_parameter('baud').get_parameter_value().integer_value
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
 
+        # --- QOS PROFILE ---
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
         # --- PUBLISHERS ---
-        self.fix_pub = self.create_publisher(NavSatFix, '/gnss/fix', 10)
-        self.enu_pub = self.create_publisher(PoseWithCovarianceStamped, '/gps/enu_pose', 10)
+        self.fix_pub = self.create_publisher(NavSatFix, '/gnss/fix', sensor_qos)
+        self.enu_pub = self.create_publisher(PoseWithCovarianceStamped, '/gps/enu_pose', sensor_qos)
+        # NEW: Publish Speed for the EKF
+        self.speed_pub = self.create_publisher(Float32, '/gps/speed_kmph', sensor_qos)
 
         # --- CARTESIAN CONVERSION STATE ---
         self.origin_lat = None
@@ -81,24 +55,18 @@ class GNSSNode(Node):
         except Exception as e:
             self.get_logger().error(f"Serial Connection Failed: {e}")
 
-                # --- LOAD SAVED ORIGIN IF AVAILABLE ---
+        # --- LOAD SAVED ORIGIN IF AVAILABLE ---
         use_saved = self.get_parameter('use_saved_origin').value
-
         if use_saved:
             lat0 = self.get_parameter('origin_lat').value
             lon0 = self.get_parameter('origin_lon').value
             alt0 = self.get_parameter('origin_alt').value
-
             if lat0 != 0.0 and lon0 != 0.0:
                 self.origin_lat = lat0
                 self.origin_lon = lon0
                 self.origin_alt = alt0
                 self.has_origin = True
-
-                self.get_logger().info(
-                    f"Loaded saved ENU origin: "
-                    f"{lat0:.6f}, {lon0:.6f}, {alt0:.2f}"
-                )
+                self.get_logger().info(f"Loaded saved ENU origin: {lat0:.6f}, {lon0:.6f}")
 
         self.create_timer(0.01, self.read_serial_data)
 
@@ -108,22 +76,48 @@ class GNSSNode(Node):
         try:
             line = self.ser.readline().decode('utf-8', errors='replace').strip()
             
+            # PARSE GGA (Position)
             if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
                 self.parse_gga(line)
+            
+            # PARSE RMC (Speed) -> NEW!
+            elif line.startswith('$GNRMC') or line.startswith('$GPRMC'):
+                self.parse_rmc(line)
                 
         except Exception: pass
 
+    def parse_rmc(self, line):
+        # Format: $GNRMC,time,status,lat,NS,lon,EW,speed_knots,course,date...
+        parts = line.split(',')
+        if len(parts) < 8: return
+        
+        try:
+            # Check Status (A=Active, V=Void)
+            status = parts[2]
+            if status != 'A': return
+
+            # Speed is index 7 (in Knots)
+            speed_knots_str = parts[7]
+            if not speed_knots_str: return
+            
+            speed_knots = float(speed_knots_str)
+            speed_kmph = speed_knots * 1.852 # Convert to km/h
+            
+            # Publish Speed
+            msg = Float32()
+            msg.data = speed_kmph
+            self.speed_pub.publish(msg)
+            
+        except ValueError: pass
+
     def parse_gga(self, line):
-        # Format: $GNGGA,time,lat,NS,lon,EW,quality,num_sats,hdop,alt...
         parts = line.split(',')
         if len(parts) < 10: return
 
         try:
-            # 1. Check Fix Quality (0 = Invalid)
             quality = int(parts[6]) 
             if quality == 0: return 
 
-            # 2. Parse Lat/Lon (NMEA is DDMM.MMMM, we need DD.DDDD)
             raw_lat = parts[2]
             lat_dir = parts[3]
             raw_lon = parts[4]
@@ -140,37 +134,27 @@ class GNSSNode(Node):
             alt = float(parts[9]) if parts[9] else 0.0
             hdop = float(parts[8]) if parts[8] else 10.0
 
-            # 3. Publish
             self.publish_fix_and_enu(lat, lon, alt, quality, hdop)
         except ValueError: pass
 
     def nmea_to_decimal(self, dm):
-        # Helper: Converts "1908.1116" (DDMM.MMMM) -> 19.1351 (Decimal Deg)
         if not dm: return 0.0
-        # The last 2 digits of the integer part + decimals are the Minutes
-        # The rest is Degrees.
-        # Example: 1908.1116 -> Deg: 19, Min: 08.1116
-        
         dot_idx = dm.find('.')
-        if dot_idx == -1: return float(dm) # Should not happen in standard NMEA
-
-        # Degrees is everything up to 2 chars before the dot
+        if dot_idx == -1: return float(dm)
         deg_end_idx = dot_idx - 2
         degrees = float(dm[:deg_end_idx])
         minutes = float(dm[deg_end_idx:])
-        
         return degrees + (minutes / 60.0)
 
     def publish_fix_and_enu(self, lat, lon, alt, quality, hdop):
         current_time = self.get_clock().now().to_msg()
         
-        # --- CALC VARIANCE (Trust) ---
+        # --- CALC VARIANCE ---
         base_error = 2.5
-        if quality == 4: base_error = 0.02 # RTK Fixed
-        elif quality == 5: base_error = 0.5 # RTK Float
+        if quality == 4: base_error = 0.02
+        elif quality == 5: base_error = 0.5
         variance = (hdop * base_error) ** 2
-        if quality < 4:  # non-RTK
-            variance *= 3.0
+        if quality < 4: variance *= 3.0
 
         # --- 1. PUBLISH RAW FIX ---
         msg = NavSatFix()
@@ -187,7 +171,7 @@ class GNSSNode(Node):
         msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
         self.fix_pub.publish(msg)
 
-        # --- 2. PUBLISH ENU (Meters) ---
+        # --- 2. PUBLISH ENU ---
         if not self.has_origin:
             self.origin_lat = lat
             self.origin_lon = lon
@@ -196,7 +180,6 @@ class GNSSNode(Node):
             self.get_logger().info(f"ORIGIN SET: {lat:.6f}, {lon:.6f}")
             return
 
-        # Simple Local Tangent Plane Conversion
         lat_rad = math.radians(lat)
         lon_rad = math.radians(lon)
         origin_lat_rad = math.radians(self.origin_lat)
@@ -212,7 +195,6 @@ class GNSSNode(Node):
         pose_msg.pose.pose.position.x = x_enu
         pose_msg.pose.pose.position.y = y_enu
         
-        # Covariance (Diagonal)
         pose_msg.pose.covariance[0] = variance # X
         pose_msg.pose.covariance[7] = variance # Y
         pose_msg.pose.covariance[35] = 999.0   # Yaw (Unknown)
