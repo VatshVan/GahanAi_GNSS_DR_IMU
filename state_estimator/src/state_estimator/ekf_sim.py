@@ -413,9 +413,12 @@
 #!/usr/bin/env python3import rclpy
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from sensor_msgs.msg import Imu
+
 import matplotlib.pyplot as plt
 import numpy as np
 import math
@@ -425,24 +428,44 @@ class RealDataLogger(Node):
     def __init__(self):
         super().__init__('real_data_logger')
         
-        # Buffers
+        # --- 1. DEFINE QOS PROFILES ---
+        # Matches your "ros2 topic info /odometry/ekf" output
+        # (Reliable is required if the Publisher is Reliable)
+        ekf_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # "Universal" listener for sensors (GPS/IMU often use Best Effort)
+        # A Best Effort subscriber can listen to both Best Effort AND Reliable publishers.
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # --- 2. BUFFERS ---
         self.data_ekf = []      # [t, x, y, v, yaw]
         self.data_gps_pos = []  # [t, x, y]
         self.data_gps_vel = []  # [t, speed]
         self.data_imu_yaw = []  # [t, yaw]
         
-        self.start_t_epoch = None # The first timestamp we see (for t=0 reference)
+        self.start_t_epoch = None 
+        self.ekf_connected = False # Flag for first print
 
-        # SUBSCRIPTIONS
-        self.create_subscription(Odometry, '/odometry/ekf', self.cb_ekf, 10)
-        self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.cb_gps_pos, 10)
-        self.create_subscription(TwistWithCovarianceStamped, '/gps/fix_velocity', self.cb_gps_vel, 10)
-        self.create_subscription(Imu, '/imu/data_raw', self.cb_imu, 10)
+        # --- 3. SUBSCRIPTIONS ---
+        # Note: We apply the explicit QoS profiles here
+        self.create_subscription(Odometry, '/odometry/ekf', self.cb_ekf, ekf_qos)
+        self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.cb_gps_pos, sensor_qos)
+        self.create_subscription(TwistWithCovarianceStamped, '/gps/fix_velocity', self.cb_gps_vel, sensor_qos)
+        self.create_subscription(Imu, '/imu/data_raw', self.cb_imu, sensor_qos)
 
-        self.get_logger().info("📊 LOGGER READY. Press Ctrl+C to stop and generate plots.")
+        self.get_logger().info("📊 LOGGER READY. Waiting for data... (Ctrl+C to stop)")
 
     def get_rel_time(self, stamp):
-        # Converts ROS Time (Msg Header) to relative seconds
         t_sec = stamp.sec + stamp.nanosec * 1e-9
         if self.start_t_epoch is None:
             self.start_t_epoch = t_sec
@@ -452,7 +475,12 @@ class RealDataLogger(Node):
         return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def cb_ekf(self, msg):
-        t = self.get_rel_time(msg.header.stamp) # USE HEADER TIME
+        # DEBUG: Confirm connection on first msg
+        if not self.ekf_connected:
+            self.get_logger().info("✅ Connected to EKF! Recording data...")
+            self.ekf_connected = True
+
+        t = self.get_rel_time(msg.header.stamp)
         yaw = self.get_yaw(msg.pose.pose.orientation)
         
         self.data_ekf.append([
@@ -464,7 +492,7 @@ class RealDataLogger(Node):
         ])
 
     def cb_gps_pos(self, msg):
-        t = self.get_rel_time(msg.header.stamp) # USE HEADER TIME
+        t = self.get_rel_time(msg.header.stamp)
         self.data_gps_pos.append([
             t,
             msg.pose.pose.position.x,
@@ -472,14 +500,14 @@ class RealDataLogger(Node):
         ])
 
     def cb_gps_vel(self, msg):
-        t = self.get_rel_time(msg.header.stamp) # USE HEADER TIME
+        t = self.get_rel_time(msg.header.stamp)
         vx = msg.twist.twist.linear.x
         vy = msg.twist.twist.linear.y
         speed = math.sqrt(vx**2 + vy**2)
         self.data_gps_vel.append([t, speed])
 
     def cb_imu(self, msg):
-        t = self.get_rel_time(msg.header.stamp) # USE HEADER TIME
+        t = self.get_rel_time(msg.header.stamp)
         yaw = self.get_yaw(msg.orientation)
         self.data_imu_yaw.append([t, yaw])
 
@@ -492,7 +520,7 @@ class RealDataLogger(Node):
         imu_yaw = np.array(self.data_imu_yaw)
 
         if len(ekf) == 0:
-            self.get_logger().error("No EKF Data collected!")
+            self.get_logger().error("No EKF Data collected! Check topic names or QoS.")
             return
 
         fig, ax = plt.subplots(2, 2, figsize=(16, 10))
@@ -536,10 +564,12 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        # THIS ALLOWS YOU TO STOP EARLY AND STILL SEE PLOTS
         node.save_plots()
-    
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        # Check if node is already destroyed to avoid errors
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()

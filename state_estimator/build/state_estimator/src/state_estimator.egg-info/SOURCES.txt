@@ -7,6 +7,7 @@ src/state_estimator/ekf_core.py
 src/state_estimator/ekf_ros_node.py
 src/state_estimator/ekf_sim.py
 src/state_estimator/gps_bridge.py
+src/state_estimator/gps_to_enu.py
 src/state_estimator/imu_bridge.py
 src/state_estimator/sim_gps_bridge.py
 src/state_estimator/sim_imu_bridge.py

@@ -718,10 +718,10 @@
 
 
 
-
-
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 from nav_msgs.msg import Odometry
@@ -730,160 +730,153 @@ from tf2_ros import TransformBroadcaster
 from math import sin, cos, sqrt, degrees, radians, atan2, asin, pi
 import numpy as np
 import math
-from .ekf_core import EKF
+
+# Make sure this import matches your file structure
+from .ekf_core import EKF 
 
 class EKFNode(Node):
     def __init__(self):
         super().__init__('ekf_node')
         self.ekf = EKF()
         
-        # PARAMETERS
-        self.ROTATION_RADIUS = 0.15 
-        self.MAX_SPEED_MPS = 6.0  # Limit to ~22 km/h (User Safety Limit)
+        # --- CONFIGURATION ---
+        self.MAX_SPEED_MPS = 10.0 
+        self.ENABLE_MOTION_ALIGNMENT = True # If True, Yaw resets to match GPS track on first move
         
         # --- STATE VARIABLES ---
         self.last_msg_time = None
-        self.last_imu_time = None
-        
-        # Initialization Flags
-        self.mag_initialized = False
         self.gps_initialized = False
         self.filter_ready = False
+        self.motion_aligned = False
         
-        # Store latest speed
         self.current_gps_speed = 0.0
 
+        # --- QOS PROFILES ---
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
         # --- SUBSCRIBERS ---
-        self.create_subscription(Imu, '/imu/data_raw', self.callback_imu, 10)
-        self.create_subscription(Float32, '/gps/speed_kmph', self.callback_velocity, 10)
-        self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.callback_gnss, 10)
-        self.create_subscription(Float32, '/imu/mag_heading', self.callback_mag_init, 10)
+        self.create_subscription(Imu, '/imu/data_raw', self.callback_imu, sensor_qos)
+        self.create_subscription(Float32, '/gps/speed_kmph', self.callback_velocity, sensor_qos)
+        self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.callback_gnss, sensor_qos)
+        # Note: We removed the mag_heading subscriber. We will use Motion Alignment instead.
 
         # --- PUBLISHERS ---
-        self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 50)
-        self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, '/pose/ekf', 20)
+        self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        self.get_logger().info("--- EKF STARTED: Waiting for MAG (Yaw) + GPS (Pos) ---")
+        self.get_logger().info("🚀 EKF STARTED. Waiting for GPS...")
 
-    # 1. INIT YAW (Magnetometer)
-    def callback_mag_init(self, msg):
-        if self.mag_initialized: return
-
-        compass_angle_deg = msg.data
-        # Convert Compass (CW from North) to ENU (CCW from East)
-        yaw_enu = radians(90.0 - compass_angle_deg)
-        yaw_enu = atan2(sin(yaw_enu), cos(yaw_enu))
-
-        self.ekf.state[2] = yaw_enu
-        self.ekf.is_yaw_initialized = True
-        self.mag_initialized = True
-        
-        self.check_filter_ready()
-        self.get_logger().info(f"✅ MAG INIT: Heading set to {degrees(yaw_enu):.1f}°")
-
-    # 2. GPS HANDLER (Position Update + Init)
+    # 1. GPS HANDLER (Position Update + Motion Alignment)
     def callback_gnss(self, msg):
         x_gps = msg.pose.pose.position.x
         y_gps = msg.pose.pose.position.y
         var_x = msg.pose.covariance[0]
         var_y = msg.pose.covariance[7]
 
-        # [NEW] Initialize Position if not done yet
+        # A. Initialization
         if not self.gps_initialized:
             self.ekf.state[0] = x_gps
             self.ekf.state[1] = y_gps
             self.gps_initialized = True
-            self.check_filter_ready()
+            self.filter_ready = True
             self.get_logger().info(f"✅ GPS INIT: Position set to X:{x_gps:.1f}, Y:{y_gps:.1f}")
             return
 
         if not self.filter_ready: return
 
-        # Standard Update
-        R_gps = np.diag([var_x, var_y]) * 3.0
+        # B. Motion Alignment (The "Sawtooth" Fix)
+        # If we are moving (>0.5 m/s) and haven't aligned yet, 
+        # SNAP the Yaw to match the GPS vector.
+        if self.ENABLE_MOTION_ALIGNMENT and not self.motion_aligned and self.current_gps_speed > 0.5:
+            dx = x_gps - self.ekf.state[0]
+            dy = y_gps - self.ekf.state[1]
+            dist = sqrt(dx**2 + dy**2)
+            
+            if dist > 0.2: # Ensure we actually moved between frames
+                track_yaw = atan2(dy, dx)
+                self.ekf.state[2] = track_yaw # Force Yaw
+                self.ekf.is_yaw_initialized = True
+                self.motion_aligned = True
+                self.get_logger().info(f"📐 MOTION ALIGNMENT: Yaw snapped to {degrees(track_yaw):.1f}°")
+
+        # C. Standard Update
+        # Trust GPS Position heavily (Low variance)
+        R_gps = np.diag([0.5, 0.5]) 
         self.ekf.update_gps(x_gps, y_gps, R_gps)
 
-    # 3. VELOCITY HANDLER
+    # 2. VELOCITY HANDLER
     def callback_velocity(self, msg):
-        # Incoming is km/h, convert to m/s
         speed_mps = msg.data / 3.6
         self.current_gps_speed = speed_mps
 
         if not self.filter_ready: return
 
-        # [CHANGE] CRUSH THE VARIANCE. Trust GPS speed highly.
-        # This forces the EKF to stick to the green dots in your plot.
-        var_speed = 0.05 ** 2 
-        
+        # Trust GPS Speed ALMOST PERFECTLY.
+        # This forces the Blue line to stick to the Green dots.
+        var_speed = 0.01 
         self.ekf.update_wheel_speed(speed_mps, var_speed)
 
-    # 4. PREDICTION STEP (The Core Fix)
+    # 3. PREDICTION STEP
     def callback_imu(self, msg: Imu):
-        now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        self.last_imu_time = now
+        if not self.filter_ready: return
 
-        if self.last_msg_time is None: self.last_msg_time = now; return
+        now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        
+        if self.last_msg_time is None: 
+            self.last_msg_time = now
+            return
+            
         dt = now - self.last_msg_time
         self.last_msg_time = now
-        if dt <= 0 or not self.filter_ready: return
+        
+        if dt <= 0: return
 
-        # --- A. GRAVITY COMPENSATION ---
-        q = msg.orientation
-        sin_p = 2 * (q.w * q.y - q.z * q.x)
-        if abs(sin_p) >= 1: current_pitch = math.copysign(pi / 2, sin_p)
-        else: current_pitch = asin(sin_p)
-
-        accel_raw = msg.linear_acceleration.x
+        # --- A. YAW RATE ---
+        # We only use the Gyro. We IGNORE the accelerometer for speed.
         yaw_rate  = msg.angular_velocity.z
         
-        # Calculate Net Accel (Kinematic)
-        accel_net = accel_raw - (9.81 * sin(current_pitch)) 
-
-        # [CHANGE] Disable Centripetal if noisy.
-        # If yaw_rate is noisy, this term explodes. Uncomment only if IMU is high-end.
-        # accel_net = accel_net - ((yaw_rate ** 2) * self.ROTATION_RADIUS)
-
-        # [CHANGE] Deadzone & Stationary Check
-        # 1. If GPS says we are stopped, FORCE accel to 0
-        if self.current_gps_speed < 0.2:
-            accel_net = 0.0
-            # Optional: decay velocity to 0 slowly
-            self.ekf.state[3] *= 0.9 
-        # 2. If accel is small (vibration), ignore it
-        elif abs(accel_net) < 0.3: 
-            accel_net = 0.0
+        # --- B. ACCEL IGNORE ---
+        # Force acceleration to 0. This stops the velocity spikes.
+        # We rely 100% on GPS updates for speed changes.
+        accel_net = 0.0
 
         # Predict
         self.ekf.predict(accel_net, yaw_rate, dt)
 
-        # [CHANGE] Safety Clamp on Resulting Velocity
-        # Prevent the "20 m/s" explosion
-        if self.ekf.state[3] > self.MAX_SPEED_MPS:
-            self.ekf.state[3] = self.MAX_SPEED_MPS
-        elif self.ekf.state[3] < -self.MAX_SPEED_MPS:
-            self.ekf.state[3] = -self.MAX_SPEED_MPS
-
+        # Publish
         self.publish_odometry(msg.header.stamp)
-
-    def check_filter_ready(self):
-        if self.mag_initialized and self.gps_initialized and not self.filter_ready:
-            self.filter_ready = True
-            self.get_logger().info("🚀 ALL SYSTEMS GO: EKF Prediction Enabled!")
 
     def publish_odometry(self, stamp):
         s = self.ekf.state
+        
         t = TransformStamped()
-        t.header.stamp = stamp; t.header.frame_id = 'odom'; t.child_frame_id = 'base_link'
-        t.transform.translation.x, t.transform.translation.y = s[0], s[1]
-        t.transform.rotation.z = sin(s[2]/2.0); t.transform.rotation.w = cos(s[2]/2.0)
+        t.header.stamp = stamp
+        t.header.frame_id = 'odom'
+        t.child_frame_id = 'base_link'
+        t.transform.translation.x = float(s[0])
+        t.transform.translation.y = float(s[1])
+        t.transform.translation.z = 0.0
+        
+        t.transform.rotation.z = sin(s[2]/2.0)
+        t.transform.rotation.w = cos(s[2]/2.0)
+        
         self.tf_broadcaster.sendTransform(t)
         
         o = Odometry()
-        o.header = t.header; o.child_frame_id = t.child_frame_id
-        o.pose.pose.position.x, o.pose.pose.position.y = s[0], s[1]
+        o.header = t.header
+        o.child_frame_id = t.child_frame_id
+        o.pose.pose.position.x = float(s[0])
+        o.pose.pose.position.y = float(s[1])
         o.pose.pose.orientation = t.transform.rotation
-        o.twist.twist.linear.x, o.twist.twist.angular.z = s[3], s[4]
+        
+        o.twist.twist.linear.x = float(s[3])
+        o.twist.twist.angular.z = float(s[4])
+        
         self.pub_odom.publish(o)
 
 def main(args=None):
@@ -891,4 +884,5 @@ def main(args=None):
     rclpy.spin(EKFNode())
     rclpy.shutdown()
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()
