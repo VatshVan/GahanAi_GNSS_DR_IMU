@@ -887,6 +887,8 @@ from tf2_ros import TransformBroadcaster
 from math import sin, cos, sqrt, degrees, radians, atan2, asin, pi
 import numpy as np
 import math
+
+# Make sure this import matches your file structure
 from .ekf_core import EKF 
 
 class EKFNode(Node):
@@ -1034,6 +1036,7 @@ class EKFNode(Node):
     def publish_odometry(self, stamp):
         s = self.ekf.state
         
+        # --- 1. TF BROADCAST ---
         t = TransformStamped()
         t.header.stamp = stamp
         t.header.frame_id = 'odom'
@@ -1047,15 +1050,46 @@ class EKFNode(Node):
         
         self.tf_broadcaster.sendTransform(t)
         
+        # --- 2. ODOMETRY MESSAGE ---
         o = Odometry()
         o.header = t.header
         o.child_frame_id = t.child_frame_id
+        
+        # Pose
         o.pose.pose.position.x = float(s[0])
         o.pose.pose.position.y = float(s[1])
+        o.pose.pose.position.z = 0.0
         o.pose.pose.orientation = t.transform.rotation
         
+        # Pose Covariance (6x6)
+        # We populate the diagonal to tell Nav2/Controls what we know.
+        # Format: [x, y, z, roll, pitch, yaw]
+        pose_cov = np.zeros(36, dtype=np.float64)
+        pose_cov[0]  = self.ekf.P[0,0] # Var X
+        pose_cov[7]  = self.ekf.P[1,1] # Var Y
+        pose_cov[14] = 99999.0         # Var Z (Unknown/High)
+        pose_cov[21] = 99999.0         # Var Roll
+        pose_cov[28] = 99999.0         # Var Pitch
+        pose_cov[35] = self.ekf.P[2,2] # Var Yaw
+        o.pose.covariance = pose_cov
+
+        # Twist (Velocity)
         o.twist.twist.linear.x = float(s[3])
+        o.twist.twist.linear.y = 0.0 # Non-holonomic assumption (car cannot slide sideways)
+        o.twist.twist.linear.z = 0.0
+        o.twist.twist.angular.x = 0.0
+        o.twist.twist.angular.y = 0.0
         o.twist.twist.angular.z = float(s[4])
+        
+        # Twist Covariance (6x6)
+        twist_cov = np.zeros(36, dtype=np.float64)
+        twist_cov[0]  = self.ekf.P[3,3] # Var Vx
+        twist_cov[7]  = 1e-6            # Var Vy (Low because we assume 0 for car)
+        twist_cov[14] = 1e-6            # Var Vz
+        twist_cov[21] = 1e-6            # Var Roll Rate
+        twist_cov[28] = 1e-6            # Var Pitch Rate
+        twist_cov[35] = self.ekf.P[4,4] # Var Yaw Rate
+        o.twist.covariance = twist_cov
         
         self.pub_odom.publish(o)
 
