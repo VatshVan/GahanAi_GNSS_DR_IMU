@@ -1,3 +1,181 @@
+"""
+GNSS Bridge Node (state_estimator/gps_bridge.py)
+------------------------------------------------
+Module Purpose
+---------------
+This module implements GNSSNode, a lightweight ROS 2 node that bridges a
+serial NMEA GNSS receiver to ROS 2 topics. It parses selected NMEA sentences
+(GGA for position and RMC for speed), publishes standardized ROS messages
+for raw geodetic fixes and a local ENU pose, and provides a simple
+approximate cartesian conversion suitable for integration with onboard
+state-estimators and sensor fusion frameworks.
+Design Goals
+------------
+- Robust, production-ready NMEA parsing with defensive error handling.
+- ROS 2 native: parameters, QoS, timestamps, and proper message types.
+- Minimal dependencies: rclpy, pyserial, and standard ROS message packages.
+- Clear semantics for covariance and coordinate-frame conventions so that
+    downstream estimators (e.g., EKF) can reason about uncertainty.
+- Extendable: parsing and publishing are separated for clarity and easy
+    augmentation (e.g., add heading, PDOP, or RTK corrections).
+Public API Summary
+------------------
+Class:
+        GNSSNode(Node)
+                ROS 2 node exposing the serial GNSS bridge functionality.
+Functions:
+        main(args=None)
+                Standard ROS 2 main entry point. Initializes rclpy, instantiates the
+                node, spins until shutdown, then cleans up.
+ROS Parameters (defaults shown)
+-------------------------------
+- port (string, default "/dev/ttyUSB1"):
+        Serial device path for the GNSS receiver.
+- baud (int, default 115200):
+        Serial baud rate.
+- frame_id (string, default "gnss_link"):
+        Header frame_id to put on NavSatFix messages.
+- use_saved_origin (bool, default True):
+        If True and origin_lat/lon non-zero, the node will use the configured
+        origin instead of setting the origin on the first valid fix.
+- origin_lat (float, default 0.0):
+        Saved origin latitude in degrees (WGS84).
+- origin_lon (float, default 0.0):
+        Saved origin longitude in degrees (WGS84).
+- origin_alt (float, default 0.0):
+        Saved origin altitude in meters.
+Published Topics
+----------------
+- /gnss/fix (sensor_msgs/NavSatFix)
+        Raw GNSS fix in WGS84 latitude/longitude/altitude with an approximated
+        position covariance based on HDOP and fix quality. Header timestamp
+        populated using node clock; header.frame_id uses the `frame_id`
+        parameter.
+- /gps/enu_pose (geometry_msgs/PoseWithCovarianceStamped)
+        Local ENU pose relative to the configured or first-acquired origin.
+        Position units are meters. Covariance maps X->index 0, Y->index 7,
+        and yaw uncertainty placed at index 35 (set to a large value if unknown).
+- /gps/speed_kmph (std_msgs/Float32)
+        Scalar speed in kilometers per hour, extracted from the RMC sentence
+        (converted from knots).
+NMEA Sentences Handled
+----------------------
+- GGA ($GPGGA or $GNGGA): Position, fix quality, altitude, and HDOP.
+    The node requires a non-zero fix quality to accept the fix.
+- RMC ($GPRMC or $GNRMC): Speed (knots) and fix status (A=active).
+    Only publishes speed if status is 'A'.
+Parsing Notes & Conversions
+---------------------------
+- NMEA latitude/longitude are parsed from the degrees+minutes format
+    (ddmm.mmmm or dddmm.mmmm) into decimal degrees. Negative sign is applied
+    based on hemisphere letters (S or W).
+- ENU conversion is an equirectangular/small-angle approximation:
+        x = (lon - lon0) * R_e * cos(lat0)
+        y = (lat - lat0) * R_e
+    where R_e is the constant EARTH_RADIUS = 6_378_137.0 m (WGS84 equatorial).
+    This approximation is suitable for small baselines (typically < 100 km)
+    and is computationally efficient. For large-scale or high-precision
+    applications, replace with a proper ellipsoidal geodetic library (e.g.,
+    GeographicLib or PROJ).
+Covariance and Uncertainty
+--------------------------
+- Position covariance is derived heuristically:
+        variance = (hdop * base_error)^2
+    base_error is selected by fix quality:
+        - Default base_error = 2.5 m
+        - SBAS (quality == 4): base_error = 0.02 m
+        - RTK (quality == 5): base_error = 0.5 m
+    If quality < 4, variance is increased (multiplied by 3) to reflect lower
+    confidence.
+- NavSatFix::position_covariance uses a diagonal approximation with
+    altitude variance scaled (index 8) to be larger (variance*4). The
+    covariance type is set to COVARIANCE_TYPE_APPROXIMATED.
+- PoseWithCovarianceStamped::pose.covariance fills indices 0 (x) and 7 (y)
+    and sets index 35 (yaw) to a large placeholder (999.0) to denote unknown
+    orientation; users should fuse orientation from other sensors (IMU).
+Operational Behavior
+--------------------
+- Serial port initialization occurs in the constructor. Connection failures
+    are logged; the node continues running but will not publish until the
+    serial port becomes available.
+- The node reads serial data at 100 Hz (timer interval 0.01s) and decodes
+    lines via readline with a 0.1s serial timeout. Parsing is defensive
+    against malformed sentences and conversion errors.
+- The first valid GGA fix sets the local ENU origin unless use_saved_origin
+    is True and non-zero origin parameters are provided at startup.
+Error Handling and Logging
+--------------------------
+- Malformed NMEA sentences, conversion errors, and serial IO exceptions are
+    caught and ignored to avoid crashing the node. Relevant conditions are
+    logged at appropriate levels (info/error).
+- If the serial port cannot be opened at startup, an error is logged and
+    the node continues. Operator tooling or systemd/launch wrappers should
+    monitor logs and restart the node if necessary.
+Performance and Resource Use
+----------------------------
+- CPU: minimal. Parsing is line-oriented and lightweight; suitable for
+    embedded SBCs (Raspberry Pi, Jetson, etc.).
+- Memory: minimal. No dynamic allocation patterns beyond message creation
+    per publish event.
+- Timing: the current design relies on the kernel serial driver and Python
+    interpreter; for hard real-time constraints use a native C++ node or
+    hardware offload.
+Security Considerations
+-----------------------
+- Serial input is treated as untrusted. The parser uses defensive coding
+    (length checks and try/except) to avoid crashes from malformed input.
+- If used in networked deployments, secure the host (disable unused services,
+    restrict device permissions) and ensure that serial access is limited to
+    trusted processes.
+Extensibility and Best Practices
+--------------------------------
+- To add additional NMEA sentences (ZDA, GSV, GST, GSA, VTG, etc.), implement
+    corresponding parse_* methods and publish to additional topics.
+- Replace the simple ENU approximation with GeographicLib for precision:
+    projections.
+- If persistent origin storage across reboots is required, manage origin
+    parameters via a launch-time script or a parameter server persistence
+    mechanism (e.g., YAML-loaded parameters via ros2 launch).
+- For RTK-capable receivers, consider integrating raw RTCM stream handling or
+    NTRIP clients rather than relying solely on the NMEA-derived fix.
+Testing and Validation
+----------------------
+- Unit tests: isolate parsing functions (nmea_to_decimal, parse_gga,
+    parse_rmc) and validate against representative sentence examples:
+    - Typical valid GGA and RMC messages
+    - Edge cases: empty fields, invalid numeric text, unsupported fix quality
+- Integration tests: run the node against recorded serial logs, a GNSS
+    simulator (e.g., gps-sdr-sim), and a real receiver, validating frame
+    timestamps, covariance semantics, and ENU offsets.
+- Continuous integration: include linting (flake8/black), type checks
+    (mypy, if type annotations are added), and automated test runs.
+Backward Compatibility and Versioning
+------------------------------------
+- Keep parameter names and topic names stable for downstream consumers.
+- If changes are necessary (e.g., rename topic or message semantics),
+    follow semantic versioning, provide a migration guide, and support
+    both old and new topics during a transition period.
+Example Launch Snippet (YAML parameters)
+----------------------------------------
+# In a launch file or YAML parameter set:
+# gnss_node:
+#   ros__parameters:
+#     port: "/dev/ttyUSB1"
+#     baud: 115200
+#     frame_id: "gnss_link"
+#     use_saved_origin: true
+#     origin_lat: 12.345678
+#     origin_lon: 98.765432
+#     origin_alt: 10.0
+Maintenance Notes
+-----------------
+- Keep pyserial updated to benefit from stability and security fixes.
+- Revisit the ENU conversion if application domain expands beyond small
+    baseline robotic platforms.
+- Document any changes to covariance logic and publish migration notes for
+    state estimator tuning.
+
+"""
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
@@ -6,7 +184,8 @@ import serial
 import math
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from std_msgs.msg import Float32 # <--- REQUIRED FOR SPEED
+# from geographiclib.geodesic import Geodesic or use pyproj for local
+from std_msgs.msg import Float32
 
 class GNSSNode(Node):
     def __init__(self):

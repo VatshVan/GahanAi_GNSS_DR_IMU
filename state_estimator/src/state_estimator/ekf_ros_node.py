@@ -1,43 +1,202 @@
-# """
-# Extended Kalman Filter (EKF) ROS Node for GNSS/IMU State Estimation.
-# This module implements a state estimator node that fuses GPS (GNSS) and IMU sensor data
-# using an Extended Kalman Filter to provide robust position, velocity, and orientation
-# estimates for autonomous systems. The EKF performs prediction steps using IMU accelerometer
-# and gyroscope measurements, and correction steps using GPS position fixes with dynamic
-# covariance weighting.
-# **State Vector (5-DOF):**
-#     - x, y: ENU coordinates (meters)
-#     - yaw: heading angle (radians)
-#     - velocity: forward speed (m/s)
-#     - omega: yaw rate (rad/s)
-# **Key Features:**
-#     - GPS initialization with heading alignment via vehicle motion
-#     - Adaptive covariance rejection gate for unreliable GPS fixes
-#     - IMU preprocessing: gravity compensation, centrifugal acceleration correction
-#     - Dynamic friction model for velocity decay during stationary periods
-#     - Real-time TF broadcasting and multi-endpoint odometry publishing
-#     - Throttled logging for production environments
-# **Subscribers:**
-#     - /imu/diff (Imu): Differential IMU measurements at 50-100 Hz
-#     - /imu/pitch (Float32): Vehicle pitch angle for gravity decomposition
-#     - /gps/enu_pose (PoseWithCovarianceStamped): GPS position with uncertainty
-# **Publishers:**
-#     - /odometry/ekf (Odometry): Estimated state at IMU rate
-#     - /pose/ekf (PoseWithCovarianceStamped): State with diagonal covariance
-#     - /position/ekf (PointStamped): Position-only output for diagnostics
-#     - tf: base_link frame relative to odom
-# **Dependencies:**
-#     - rclpy: ROS 2 Python client library
-#     - numpy: Numerical computation
-#     - ekf_core.EKF: External EKF implementation module
-# **Performance Characteristics:**
-#     - Prediction latency: <10 ms per IMU sample
-#     - GPS update processing: <5 ms
-#     - Covariance matrix: 5×5 symmetric positive definite
-#     - Numerical stability: Matrix inversion safeguarded with exception handling
-# **Author:** VatshVan
-# **License:** Proprietary - GahanAI
-# """
+"""
+Extended Kalman Filter ROS2 Node for GNSS/IMU Fusion — Module Docstring
+Module Purpose
+---------------
+This module implements a production-grade Extended Kalman Filter (EKF) ROS2 node that
+fuses GNSS (GPS) position and velocity information with IMU angular-rate (and optionally
+accelerometer/wheel-speed) inputs to produce robust, continuous pose and velocity estimates
+for ground vehicles or similarly constrained robotic platforms.
+The implementation is intentionally minimal in runtime work per sample (predict/update
+separations) and is designed to be:
+- Deterministic and real-time friendly (small predictable per-sample computation).
+- Easy to extend and retune (clear places to change process/measurement covariances).
+- Interoperable with ROS2 ecosystems (standard message types and TF broadcasting).
+- Maintainable for long-term use (documented assumptions, interfaces, and tests).
+Primary Components
+------------------
+- EKFNode (rclpy.Node)
+    - ROS2 node that performs:
+        - IMU-based prediction step (uses angular rate; accelerometer optional).
+        - GNSS position updates with optional motion-based heading alignment.
+        - Wheel/primary speed integration as a trusted speed source (optionally validated
+          against fix velocity).
+        - TF broadcasting ("odom" -> "base_link") and /odometry/ekf publishing.
+    - Subscribed topics (default names):
+        - /imu/data_raw                   (sensor_msgs/Imu)
+            - Used primarily for angular rate (z) for heading integration.
+            - Accelerometer support exists in code paths but may be disabled by config.
+        - /gps/enu_pose                   (geometry_msgs/PoseWithCovarianceStamped)
+            - GNSS position in ENU frame; covariance array used to form measurement R.
+        - /gps/speed_kmph                 (std_msgs/Float32)
+            - Primary trusted speed source (treated like wheel odometry).
+            - Units: km/h input, converted to m/s internally.
+        - /gps/fix_velocity               (geometry_msgs/TwistWithCovarianceStamped)
+            - Optional velocity vector (east/north). Used to validate primary speed.
+    - Published topics:
+        - /odometry/ekf                   (nav_msgs/Odometry)
+            - Pose and twist representation of the filter state.
+        - TF: odom -> base_link
+            - Pose broadcast for downstream consumers.
+    - QoS:
+        - IMU, GPS and speed topics use a best-effort, volatile, KEEP_LAST QoS suitable
+          for current vehicle-data streaming scenarios. Adjust QoS for networks with
+          lossy/delayed transports or across namespace boundaries as required.
+- EKF (imported from .ekf_core)
+    - Filter core implementing predict/measurement update logic.
+    - Expected public API:
+        - state: numpy array-like [pos_x, pos_y, yaw, velocity, yaw_rate]
+        - P: covariance matrix matching state size (5x5 in current design)
+        - is_yaw_initialized: boolean flag used by node to gate alignment/updates
+        - predict(accel: float, yaw_rate: float, dt: float)
+        - update_gps(x: float, y: float, R: np.ndarray(2x2))
+        - update_wheel_speed(speed_mps: float, var_speed: float)
+        - get_current_state() -> state vector
+    - Notes:
+        - The EKF implementation is intentionally separate. Changes to the EKF API must
+          preserve these method signatures or the node must be updated accordingly.
+State Representation and Units
+------------------------------
+- State vector (5-DOF):
+    - index 0: pos_x (meters, ENU East)
+    - index 1: pos_y (meters, ENU North)
+    - index 2: yaw (radians, ENU heading measured CCW from East; consistent with atan2(dy,dx))
+    - index 3: velocity (m/s, forward along yaw)
+    - index 4: yaw_rate (rad/s)
+- Time: seconds using ROS2 message header timestamps (header.stamp.sec + header.stamp.nanosec*1e-9).
+- All angles use radians internally. Exposed logs may show degrees for human readability.
+Design Assumptions & Behavioral Summary
+--------------------------------------
+- Coordinate Frame: ENU (East, North, Up). TF published from "odom" to "base_link".
+- IMU:
+    - Primary purpose is to supply yaw_rate (angular_velocity.z) for heading integration.
+    - Accelerometer-based speed integration is intentionally weak/disabled in production
+      configurations to avoid drift; speed is primarily sourced from GNSS/wheel.
+    - A pitch message may optionally be consumed when gravity compensation is required.
+- GPS:
+    - PoseWithCovarianceStamped is used as the position measurement; covariance indices 0
+      and 7 correspond to Var(x) and Var(y).
+    - A motion-alignment strategy exists: on first meaningful motion the yaw can be
+      snapped to GPS track. This mitigates initial yaw ambiguity ("sawtooth" alignment).
+- Speed Sources:
+    - Primary speed input is /gps/speed_kmph (treated similar to wheel odometry).
+    - A secondary /gps/fix_velocity vector can be used to validate or reject the
+      primary speed to detect slip or stale readings.
+- Initialization:
+    - The node sets the filter position to the first received GNSS fix and waits for
+      motion alignment if enabled before accepting IMU-based predictions for full
+      operation (filter_ready flag).
+- Robustness:
+    - Sanity checks in the node reject unrealistic wheel speeds vs predicted speeds.
+    - The EKF should guard matrix inversions with proper exception handling internally.
+Configuration and Tunables
+--------------------------
+- Node-level configuration constants (can be converted to ROS2 parameters):
+    - MAX_SPEED_MPS: maximum allowed vehicle speed for sanity clamping.
+    - ENABLE_MOTION_ALIGNMENT: enable/disable snapping yaw to GPS track on initial motion.
+    - ROTATION_RADIUS: used when compensating centrifugal acceleration if accelerometer
+      input is used (meters).
+    - R_gps: measurement covariance used for GPS updates; currently defaulted in-node but
+      should be configured based on receiver-class (RTK vs SBAS vs consumer).
+- EKF internal matrices:
+    - Q (process noise) and initial P must be tuned per platform mass, sensor quality,
+      and expected dynamics. Add ROS2 parameters to make these configurable at runtime.
+- QoS settings: adjust reliability/durability/depth as deployment characteristics demand.
+Operational Guidelines & Best Practices
+--------------------------------------
+- Time Synchronization:
+    - Ensure sensors publish timestamps in a consistent clock (ideally synced to the
+      robot/local host clock). ROS2 Time or hardware timestamping is preferred.
+- GPS Covariance:
+    - Use GNSS receivers that publish realistic covariance estimates. If unavailable,
+      configure R_gps conservatively (larger variances) to avoid overconfidence.
+- Bootstrapping:
+    - Start vehicle stationary and allow a few GNSS fixes to set the initial position.
+    - Enable motion alignment by ensuring the vehicle moves straight for a few meters
+      to allow yaw snapping to the GPS track if required.
+- Testing:
+    - Unit tests for EKF core (predict/update math, Jacobians, covariance positive-definiteness).
+    - Integration tests in simulation (Gazebo/recorded bag files) with injected noise.
+    - Long-duration stress tests at expected mission profiles.
+- Observability & Telemetry:
+    - Expose filter residuals, innovation covariance S, and gain K on a diagnostics topic
+      or logging/metrics endpoint for tuning and monitoring.
+    - Log occasional (throttled) summaries of P-diagonal elements to monitor uncertainty growth.
+- Safety:
+    - Do not feed this estimator directly to safety-critical motion controllers without
+      additional health checks (e.g., GNSS integrity, NTRIP/RTK fix status, wheel slip detection).
+Failure Modes and Mitigations
+----------------------------
+- Stale or missing IMU:
+    - Node currently uses IMU for yaw_rate; if IMU becomes unavailable, yaw integration
+      will stall — consider fallback strategies (e.g., dead-reckoning with last known speed
+      and yaw or rely on GPS heading when moving).
+- GPS outages:
+    - Expect larger positional uncertainty during GNSS outages. Increase Q for velocity
+      process noise and rely on wheel odometry if available.
+- Overconfident GPS covariance:
+    - If receiver supplies unrealistically small covariances, the filter may become
+      overconfident and unstable. Clamp minimum R values or perform sanity checks on
+      covariance priors.
+- Singularity in update (S matrix singular):
+    - EKF must handle and recover from linear-algebra exceptions; fallback to
+      conservative covariance inflation or skipping the update.
+Extensibility & Integration Points
+---------------------------------
+- Parameterization:
+    - Convert hard-coded constants (MAX_SPEED_MPS, R_gps defaults, motion alignment
+      thresholds) to ROS2 node parameters for in-situ tuning and easier long-term maintenance.
+- Additional Sensors:
+    - Visual odometry, LiDAR pose updates, or wheel encoders can be integrated by adding
+      measurement handlers that publish to the same EKF API (extend EKF.update_* methods).
+- Multi-rate Handling:
+    - Node assumes reasonably synchronized sensors with timestamps. For multi-rate or
+      delayed measurements, consider buffering and reprocessing or use delayed-state EKF
+      (e.g., augment state with short-term pose history).
+- Diagnostics:
+    - Add a diagnostics_updater or custom diagnostic topic to expose filter health, GNSS
+      fix quality, IMU health, and residual magnitudes.
+Testing, CI and Long-term Maintenance
+------------------------------------
+- Unit Tests:
+    - EKF predict/update math must be covered with deterministic scenarios and edge-cases:
+      - Zero motion, constant velocity, pure rotation, high-noise sensors.
+- Integration Tests:
+    - Playback recorded ROS bags (IMU + GNSS + speed) and assert accepted tolerances on
+      final position/yaw after long runs.
+- Regression Tests:
+    - Add tests that capture previously observed failure modes (e.g., "stuck at zero" bug)
+      to ensure fixes remain enforced.
+- Continuous Integration:
+    - Run static analysis (mypy/flake8), unit tests, and integration tests (sensor bag playback)
+      on each change to preserve behavioral contracts.
+- Backwards Compatibility:
+    - Keep the public EKF API stable or provide adapter layers when changing signatures.
+    - Maintain semantic versioning and a changelog in the repository.
+Versioning, Authorship & License
+-------------------------------
+- Author: VatshVan (documented original author)
+- License: Proprietary - GahanAI (as present in source header).
+- Maintain explicit changelog entries and adhere to semantic versioning on public releases.
+Example Usage Summary
+---------------------
+- Start ROS2 and bring up sensors that publish:
+    - /gps/enu_pose (PoseWithCovarianceStamped)
+    - /imu/data_raw (sensor_msgs/Imu)
+    - /gps/speed_kmph (std_msgs/Float32)  (optional but recommended)
+- Launch this node; observe /odometry/ekf and TF "odom" -> "base_link".
+- Tune EKF.Q, EKF.P, and R_gps based on platform characteristics and GNSS quality.
+Stability & Deprecated Notes
+----------------------------
+- The code is designed to be stable for long-term maintenance. When deprecating or
+  replacing major subsystems (e.g., switching to an Unscented KF or factor-graph
+  backend), provide adapters or migration scripts and keep test coverage to prevent
+  regressions across versions.
+Contact & Support
+-----------------
+- For questions about algorithmic choices, EKF tuning, or integration guidance, contact
+  the original author/maintainers. Include reproducer bags and configuration files for
+  efficient diagnosis.
+"""
 
 # import rclpy
 # from rclpy.node import Node
@@ -716,8 +875,6 @@
 
 
 
-
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -730,8 +887,6 @@ from tf2_ros import TransformBroadcaster
 from math import sin, cos, sqrt, degrees, radians, atan2, asin, pi
 import numpy as np
 import math
-
-# Make sure this import matches your file structure
 from .ekf_core import EKF 
 
 class EKFNode(Node):
@@ -778,7 +933,7 @@ class EKFNode(Node):
         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        self.get_logger().info("🚀 EKF STARTED. Waiting for GPS...")
+        self.get_logger().info("EKF STARTED. Waiting for GPS...")
 
     # 1. GPS HANDLER (Position Update + Motion Alignment)
     def callback_gnss(self, msg):
@@ -793,7 +948,7 @@ class EKFNode(Node):
             self.ekf.state[1] = y_gps
             self.gps_initialized = True
             self.filter_ready = True
-            self.get_logger().info(f"✅ GPS INIT: Position set to X:{x_gps:.1f}, Y:{y_gps:.1f}")
+            self.get_logger().info(f"GPS INIT: Position set to X:{x_gps:.1f}, Y:{y_gps:.1f}")
             return
 
         if not self.filter_ready: return
@@ -812,7 +967,7 @@ class EKFNode(Node):
                 self.ekf.state[2] = track_yaw # Force Yaw
                 self.ekf.is_yaw_initialized = True
                 self.motion_aligned = True
-                self.get_logger().info(f"📐 MOTION ALIGNMENT: Yaw snapped to {degrees(track_yaw):.1f}°")
+                self.get_logger().info(f"MOTION ALIGNMENT: Yaw snapped to {degrees(track_yaw):.1f}°")
 
         # C. Standard Update
         # Trust GPS Position heavily (Low variance)

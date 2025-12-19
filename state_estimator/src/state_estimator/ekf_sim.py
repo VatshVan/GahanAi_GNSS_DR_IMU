@@ -408,9 +408,6 @@
 
 
 
-
-
-#!/usr/bin/env python3import rclpy
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -418,6 +415,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Float32
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -428,9 +426,7 @@ class RealDataLogger(Node):
     def __init__(self):
         super().__init__('real_data_logger')
         
-        # --- 1. DEFINE QOS PROFILES ---
-        # Matches your "ros2 topic info /odometry/ekf" output
-        # (Reliable is required if the Publisher is Reliable)
+        # --- QOS PROFILES ---
         ekf_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
@@ -438,8 +434,6 @@ class RealDataLogger(Node):
             depth=10
         )
 
-        # "Universal" listener for sensors (GPS/IMU often use Best Effort)
-        # A Best Effort subscriber can listen to both Best Effort AND Reliable publishers.
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -447,21 +441,23 @@ class RealDataLogger(Node):
             depth=10
         )
 
-        # --- 2. BUFFERS ---
+        # --- BUFFERS ---
         self.data_ekf = []      # [t, x, y, v, yaw]
         self.data_gps_pos = []  # [t, x, y]
-        self.data_gps_vel = []  # [t, speed]
+        self.data_gps_vel = []  # [t, speed_vector_magnitude]
+        self.data_rmc_speed = [] # [t, speed_scalar_rmc]
         self.data_imu_yaw = []  # [t, yaw]
         
         self.start_t_epoch = None 
-        self.ekf_connected = False # Flag for first print
+        self.last_valid_time = None 
+        self.ekf_connected = False 
 
-        # --- 3. SUBSCRIPTIONS ---
-        # Note: We apply the explicit QoS profiles here
+        # --- SUBSCRIPTIONS ---
         self.create_subscription(Odometry, '/odometry/ekf', self.cb_ekf, ekf_qos)
         self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.cb_gps_pos, sensor_qos)
         self.create_subscription(TwistWithCovarianceStamped, '/gps/fix_velocity', self.cb_gps_vel, sensor_qos)
         self.create_subscription(Imu, '/imu/data_raw', self.cb_imu, sensor_qos)
+        self.create_subscription(Float32, '/gps/speed_kmph', self.cb_rmc_speed, sensor_qos)
 
         self.get_logger().info("📊 LOGGER READY. Waiting for data... (Ctrl+C to stop)")
 
@@ -469,13 +465,15 @@ class RealDataLogger(Node):
         t_sec = stamp.sec + stamp.nanosec * 1e-9
         if self.start_t_epoch is None:
             self.start_t_epoch = t_sec
-        return t_sec - self.start_t_epoch
+        
+        rel_time = t_sec - self.start_t_epoch
+        self.last_valid_time = rel_time 
+        return rel_time
 
     def get_yaw(self, q):
         return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def cb_ekf(self, msg):
-        # DEBUG: Confirm connection on first msg
         if not self.ekf_connected:
             self.get_logger().info("✅ Connected to EKF! Recording data...")
             self.ekf_connected = True
@@ -493,11 +491,7 @@ class RealDataLogger(Node):
 
     def cb_gps_pos(self, msg):
         t = self.get_rel_time(msg.header.stamp)
-        self.data_gps_pos.append([
-            t,
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y
-        ])
+        self.data_gps_pos.append([t, msg.pose.pose.position.x, msg.pose.pose.position.y])
 
     def cb_gps_vel(self, msg):
         t = self.get_rel_time(msg.header.stamp)
@@ -506,67 +500,141 @@ class RealDataLogger(Node):
         speed = math.sqrt(vx**2 + vy**2)
         self.data_gps_vel.append([t, speed])
 
+    def cb_rmc_speed(self, msg):
+        if self.last_valid_time is None: return 
+        t = self.last_valid_time
+        speed_mps = msg.data / 3.6 
+        self.data_rmc_speed.append([t, speed_mps])
+
     def cb_imu(self, msg):
         t = self.get_rel_time(msg.header.stamp)
         yaw = self.get_yaw(msg.orientation)
         self.data_imu_yaw.append([t, yaw])
 
     def save_plots(self):
-        self.get_logger().info("🛑 STOPPING... Generating Plots...")
+        self.get_logger().info("🛑 STOPPING... Generating 4 Analysis Files...")
         
         ekf = np.array(self.data_ekf)
         gps_pos = np.array(self.data_gps_pos)
         gps_vel = np.array(self.data_gps_vel)
+        rmc_speed = np.array(self.data_rmc_speed)
         imu_yaw = np.array(self.data_imu_yaw)
 
         if len(ekf) == 0:
-            self.get_logger().error("No EKF Data collected! Check topic names or QoS.")
+            self.get_logger().error("No EKF Data collected!")
             return
 
-        fig, ax = plt.subplots(2, 2, figsize=(16, 10))
-        plt.subplots_adjust(hspace=0.3)
-
+        # ==========================================
+        # FILE 1: DASHBOARD OVERVIEW (2x2)
+        # ==========================================
+        fig1, ax1 = plt.subplots(2, 2, figsize=(16, 10))
+        plt.suptitle("1. SYSTEM OVERVIEW", fontsize=16)
+        
         # 1. Trajectory
-        ax[0, 0].set_title("1. Trajectory")
-        ax[0, 0].plot(ekf[:,1], ekf[:,2], 'b-', lw=2, label='EKF')
-        if len(gps_pos) > 0:
-            ax[0, 0].scatter(gps_pos[:,1], gps_pos[:,2], c='r', marker='x', s=15, alpha=0.5, label='GPS')
-        ax[0, 0].axis('equal'); ax[0, 0].grid(True); ax[0, 0].legend()
+        ax1[0,0].set_title("Trajectory Map")
+        ax1[0,0].plot(ekf[:,1], ekf[:,2], 'b-', lw=2, label='EKF')
+        if len(gps_pos) > 0: ax1[0,0].scatter(gps_pos[:,1], gps_pos[:,2], c='r', marker='x', s=20, label='GPS')
+        ax1[0,0].axis('equal'); ax1[0,0].grid(True); ax1[0,0].legend()
 
-        # 2. Velocity
-        ax[0, 1].set_title("2. Speed")
-        ax[0, 1].plot(ekf[:,0], ekf[:,3], 'b-', label='EKF (Vx)')
-        if len(gps_vel) > 0:
-            ax[0, 1].scatter(gps_vel[:,0], gps_vel[:,1], c='g', s=10, alpha=0.5, label='GPS (Speed)')
-        ax[0, 1].grid(True); ax[0, 1].legend()
+        # 2. Speed
+        ax1[0,1].set_title("Speed Profile")
+        ax1[0,1].plot(ekf[:,0], ekf[:,3], 'b-', label='EKF Vx')
+        if len(rmc_speed) > 0: ax1[0,1].plot(rmc_speed[:,0], rmc_speed[:,1], 'm--', alpha=0.7, label='GPS (RMC)')
+        ax1[0,1].grid(True); ax1[0,1].legend()
 
         # 3. Yaw
-        ax[1, 0].set_title("3. Yaw")
-        ax[1, 0].plot(ekf[:,0], np.degrees(ekf[:,4]), 'k-', label='EKF')
-        if len(imu_yaw) > 0:
-            ax[1, 0].scatter(imu_yaw[:,0], np.degrees(imu_yaw[:,1]), c='orange', s=5, alpha=0.4, label='IMU')
-        ax[1, 0].grid(True); ax[1, 0].legend()
+        ax1[1,0].set_title("Heading (Yaw)")
+        ax1[1,0].plot(ekf[:,0], np.degrees(ekf[:,4]), 'k-', label='EKF Yaw')
+        if len(imu_yaw) > 0: ax1[1,0].scatter(imu_yaw[:,0], np.degrees(imu_yaw[:,1]), c='orange', s=5, alpha=0.3, label='IMU')
+        ax1[1,0].grid(True); ax1[1,0].legend()
 
-        # 4. Pos Components
-        ax[1, 1].set_title("4. Position X/Y")
-        ax[1, 1].plot(ekf[:,0], ekf[:,1], 'b-', label='X')
-        ax[1, 1].plot(ekf[:,0], ekf[:,2], 'r--', label='Y')
-        ax[1, 1].grid(True); ax[1, 1].legend()
+        # 4. X/Y Time Series
+        ax1[1,1].set_title("Position Components")
+        ax1[1,1].plot(ekf[:,0], ekf[:,1], 'b-', label='X')
+        ax1[1,1].plot(ekf[:,0], ekf[:,2], 'r--', label='Y')
+        ax1[1,1].grid(True); ax1[1,1].legend()
+        
+        plt.savefig("1_Overview.png")
+        self.get_logger().info("💾 Saved 1_Overview.png")
+        plt.close()
 
-        plt.savefig("real_world_comparison.png")
-        self.get_logger().info("💾 Plot saved to real_world_comparison.png")
-        plt.show()
+        # ==========================================
+        # FILE 2: POSITION ANALYSIS (2x1)
+        # ==========================================
+        fig2, ax2 = plt.subplots(2, 1, figsize=(12, 10))
+        plt.suptitle("2. POSITION DRIFT ANALYSIS", fontsize=16)
+
+        # X Analysis
+        ax2[0].set_title("X Position vs Time")
+        ax2[0].plot(ekf[:,0], ekf[:,1], 'b-', lw=2, label='EKF X')
+        if len(gps_pos) > 0: ax2[0].plot(gps_pos[:,0], gps_pos[:,1], 'r--', lw=1.5, label='GPS X')
+        ax2[0].grid(True); ax2[0].legend()
+
+        # Y Analysis
+        ax2[1].set_title("Y Position vs Time")
+        ax2[1].plot(ekf[:,0], ekf[:,2], 'b-', lw=2, label='EKF Y')
+        if len(gps_pos) > 0: ax2[1].plot(gps_pos[:,0], gps_pos[:,2], 'r--', lw=1.5, label='GPS Y')
+        ax2[1].grid(True); ax2[1].legend()
+
+        plt.savefig("2_Position_Detail.png")
+        self.get_logger().info("💾 Saved 2_Position_Detail.png")
+        plt.close()
+
+        # ==========================================
+        # FILE 3: VELOCITY SOURCES (2x1)
+        # ==========================================
+        fig3, ax3 = plt.subplots(2, 1, figsize=(12, 10))
+        plt.suptitle("3. VELOCITY SOURCE COMPARISON", fontsize=16)
+
+        # Source Comparison
+        ax3[0].set_title("Speed Source Overlay")
+        ax3[0].plot(ekf[:,0], ekf[:,3], 'b-', lw=2, label='EKF Output')
+        if len(rmc_speed) > 0: ax3[0].plot(rmc_speed[:,0], rmc_speed[:,1], 'm--', label='GPS RMC (Scalar)')
+        if len(gps_vel) > 0: ax3[0].scatter(gps_vel[:,0], gps_vel[:,1], c='g', s=15, alpha=0.5, label='GPS VTG (Vector)')
+        ax3[0].grid(True); ax3[0].legend()
+
+        # Stability Check (Zoomed)
+        ax3[1].set_title("Speed Stability (Zoomed)")
+        ax3[1].plot(ekf[:,0], ekf[:,3], 'b.-', lw=1, label='EKF Output')
+        ax3[1].set_ylim(bottom=-0.5, top=max(ekf[:,3]) + 1.0)
+        ax3[1].grid(True)
+
+        plt.savefig("3_Velocity_Analysis.png")
+        self.get_logger().info("💾 Saved 3_Velocity_Analysis.png")
+        plt.close()
+
+        # ==========================================
+        # FILE 4: HEADING & PATH (2x1)
+        # ==========================================
+        fig4, ax4 = plt.subplots(2, 1, figsize=(12, 10))
+        plt.suptitle("4. HEADING & PATH ALIGNMENT", fontsize=16)
+
+        # Yaw Detail
+        ax4[0].set_title("Heading Alignment (EKF vs Raw IMU)")
+        ax4[0].plot(ekf[:,0], np.degrees(ekf[:,4]), 'k-', lw=2, label='EKF (Corrected)')
+        if len(imu_yaw) > 0: ax4[0].plot(imu_yaw[:,0], np.degrees(imu_yaw[:,1]), 'orange', alpha=0.6, label='Raw IMU')
+        ax4[0].grid(True); ax4[0].legend()
+
+        # Path Shape
+        ax4[1].set_title("Resulting Path Shape")
+        ax4[1].plot(ekf[:,1], ekf[:,2], 'b-', lw=2)
+        ax4[1].axis('equal')
+        ax4[1].grid(True)
+        ax4[1].set_xlabel("X (m)")
+        ax4[1].set_ylabel("Y (m)")
+
+        plt.savefig("4_Heading_Analysis.png")
+        self.get_logger().info("💾 Saved 4_Heading_Analysis.png")
+        plt.close()
 
 def main(args=None):
     rclpy.init(args=args)
     node = RealDataLogger()
-    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.save_plots()
     finally:
-        # Check if node is already destroyed to avoid errors
         if rclpy.ok():
             node.destroy_node()
             rclpy.shutdown()
