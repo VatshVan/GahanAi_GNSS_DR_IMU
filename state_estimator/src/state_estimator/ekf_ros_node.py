@@ -517,6 +517,209 @@
 
 
 
+# import rclpy
+# from rclpy.node import Node
+# from sensor_msgs.msg import Imu
+# from std_msgs.msg import Float32
+# from nav_msgs.msg import Odometry
+# from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
+# from tf2_ros import TransformBroadcaster
+# from math import sin, cos, sqrt, degrees, atan2
+# import numpy as np
+# from .ekf_core import EKF
+
+# class EKFNode(Node):
+#     def __init__(self):
+#         super().__init__('ekf_node')
+#         self.ekf = EKF()
+#         self.last_msg_time = None
+#         self.current_pitch = 0.0
+#         self.ROTATION_RADIUS = 0.15 
+
+#         # --- SUBSCRIBERS ---
+#         self.create_subscription(Imu, '/imu/diff', self.callback_imu_diff, 10)
+#         self.create_subscription(Float32, '/imu/pitch', self.callback_pitch, 10)
+#         self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.callback_gnss, 10)
+#         self.create_subscription(Float32, '/wheel_speed', self.callback_wheel, 10)
+        
+#         # --- PUBLISHERS ---
+#         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 50)
+#         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, '/pose/ekf', 20)
+#         self.tf_broadcaster = TransformBroadcaster(self)
+
+#         self.last_imu_time   = None
+#         self.last_gps_time   = None
+#         self.last_wheel_time = None
+
+#         self.IMU_TIMEOUT   = 0.1 
+#         self.GPS_TIMEOUT   = 1.0
+#         self.WHEEL_TIMEOUT = 0.2
+
+#         self.filter_ready = False
+#         self.last_pitch_time = None
+
+#         self.get_logger().info("--- EKF STARTED: WHEEL + GPS + IMU FUSION ---")
+
+#     def callback_pitch(self, msg): 
+#         self.current_pitch = msg.data
+#         self.last_pitch_time = self.get_clock().now().nanoseconds * 1e-9
+
+#     # def callback_wheel(self, msg):
+#     #     self.last_wheel_time = self.get_clock().now().nanoseconds * 1e-9
+#     #     speed = msg.data
+#     #     now = self.get_clock().now().nanoseconds * 1e-9
+        
+#     #     # Check IMU timeout
+#     #     if self.last_imu_time and (now - self.last_imu_time) > self.IMU_TIMEOUT:
+#     #         return
+
+#     #     var_speed = 0.1 ** 2 
+#     #     self.ekf.update_wheel_speed(speed, var_speed)
+#     def callback_wheel(self, msg):
+#         self.last_wheel_time = self.get_clock().now().nanoseconds * 1e-9
+#         speed = msg.data
+#         now = self.get_clock().now().nanoseconds * 1e-9
+        
+#         # Check IMU timeout
+#         if self.last_imu_time and (now - self.last_imu_time) > self.IMU_TIMEOUT:
+#             return
+
+#         # --- SLIP DETECTION START ---
+#         # 1. Compare Wheel Speed vs. EKF Predicted Speed
+#         predicted_speed = self.ekf.state[3]
+        
+#         # 2. Threshold: 1.0 m/s difference is impossible in 0.02s (That's 50m/s^2 accel)
+#         if abs(speed - predicted_speed) > 1.0:
+#             # self.get_logger().warn(f"SLIP REJECTED: Wheel={speed:.1f}, EKF={predicted_speed:.1f}", throttle_duration_sec=1.0)
+#             return
+#         # --- SLIP DETECTION END ---
+
+#         var_speed = 0.1 ** 2 
+#         self.ekf.update_wheel_speed(speed, var_speed)
+
+#     def callback_gnss(self, msg):
+#         # 1. FIX: Calculate 'now' FIRST
+#         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        
+#         # 2. FIX: Update last_gps_time AFTER using 'now'
+#         self.last_gps_time = now
+
+#         x_gps = msg.pose.pose.position.x
+#         y_gps = msg.pose.pose.position.y
+#         var_x = msg.pose.covariance[0]
+#         var_y = msg.pose.covariance[7]
+        
+#         # Initialization
+#         if not self.ekf.is_yaw_initialized:
+#             if self.ekf.check_alignment(x_gps, y_gps, now):
+#                 self.filter_ready = True
+#                 self.get_logger().info(f"ALIGNED! Heading: {degrees(self.ekf.state[2]):.1f}")
+#             else:
+#                 self.get_logger().info(f"CALIBRATING... Drive 5m", throttle_duration_sec=1.0)
+#             return
+
+#         # Position Update
+#         R_gps = np.diag([var_x, var_y]) * 3.0
+#         self.ekf.update_gps(x_gps, y_gps, R_gps)
+
+#         if self.last_imu_time is None:
+#             return
+
+#         # Heading Drift Correction
+#         if self.ekf.last_gps_x is not None:
+#             dx = x_gps - self.ekf.last_gps_x
+#             dy = y_gps - self.ekf.last_gps_y
+#             dt = now - self.ekf.last_gps_time
+#             dist = sqrt(dx*dx + dy*dy)
+
+#             if dt > 0 and dist > 0.5:
+#                 speed_gps = dist / dt
+#                 if speed_gps > 1.0:
+#                     yaw_gps = atan2(dy, dx)
+#                     self.ekf.update_gps_heading(yaw_gps, 5.0)
+
+#         self.ekf.last_gps_x = x_gps
+#         self.ekf.last_gps_y = y_gps
+#         self.ekf.last_gps_time = now
+
+#     def callback_imu_diff(self, msg):
+#         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+#         self.last_imu_time = now
+
+#         if self.last_msg_time is None: self.last_msg_time = now; return
+#         dt = now - self.last_msg_time
+#         self.last_msg_time = now
+#         if dt <= 0: return
+
+#         if not self.filter_ready:
+#             return
+        
+#         # 3. FIX: Define accel_raw BEFORE checking pitch time
+#         accel_raw = msg.linear_acceleration.x
+#         yaw_rate  = msg.angular_velocity.z
+
+#         # Check for stale pitch data
+#         if self.last_pitch_time is None or (now - self.last_pitch_time) > 0.2:
+#             accel_net = accel_raw
+#         else:
+#             accel_net = accel_raw + (9.81 * sin(self.current_pitch)) - ((yaw_rate**2) * self.ROTATION_RADIUS)
+        
+#         if abs(accel_net) < 0.05: accel_net = 0.0
+        
+#         self.ekf.predict(accel_net, yaw_rate, dt)
+#         self.publish_odometry(msg.header.stamp)
+
+#     def publish_odometry(self, stamp):
+#         s = self.ekf.state
+#         t = TransformStamped()
+#         t.header.stamp = stamp; t.header.frame_id = 'odom'; t.child_frame_id = 'base_link'
+#         t.transform.translation.x, t.transform.translation.y = s[0], s[1]
+#         t.transform.rotation.z = sin(s[2]/2.0); t.transform.rotation.w = cos(s[2]/2.0)
+#         self.tf_broadcaster.sendTransform(t)
+        
+#         o = Odometry()
+#         o.header = t.header; o.child_frame_id = t.child_frame_id
+#         o.pose.pose.position.x, o.pose.pose.position.y = s[0], s[1]
+#         o.pose.pose.orientation = t.transform.rotation
+#         o.twist.twist.linear.x, o.twist.twist.angular.z = s[3], s[4]
+#         self.pub_odom.publish(o)
+        
+#         p = PoseWithCovarianceStamped()
+#         p.header = o.header; p.pose.pose = o.pose.pose
+        
+#         for i in range(36): p.pose.covariance[i] = 0.0
+
+#         p.pose.covariance[0]  = self.ekf.P[0,0]   # x
+#         p.pose.covariance[7]  = self.ekf.P[1,1]   # y
+#         p.pose.covariance[35] = self.ekf.P[2,2]   # yaw
+#         p.pose.covariance[14] = 999.0  # z
+#         p.pose.covariance[21] = 999.0  # roll
+#         p.pose.covariance[28] = 999.0  # pitch
+
+#         self.pub_pose.publish(p)
+
+# def main(args=None):
+#     rclpy.init(args=args)
+#     rclpy.spin(EKFNode())
+#     rclpy.shutdown()
+
+# if __name__ == '__main__': main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
@@ -524,150 +727,149 @@ from std_msgs.msg import Float32
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import TransformBroadcaster
-from math import sin, cos, sqrt, degrees, atan2
+from math import sin, cos, sqrt, degrees, radians, atan2, asin, pi
 import numpy as np
+import math
 from .ekf_core import EKF
 
 class EKFNode(Node):
     def __init__(self):
         super().__init__('ekf_node')
         self.ekf = EKF()
-        self.last_msg_time = None
-        self.current_pitch = 0.0
+        
+        # PARAMETERS
         self.ROTATION_RADIUS = 0.15 
+        self.MAX_SPEED_MPS = 6.0  # Limit to ~22 km/h (User Safety Limit)
+        
+        # --- STATE VARIABLES ---
+        self.last_msg_time = None
+        self.last_imu_time = None
+        
+        # Initialization Flags
+        self.mag_initialized = False
+        self.gps_initialized = False
+        self.filter_ready = False
+        
+        # Store latest speed
+        self.current_gps_speed = 0.0
 
         # --- SUBSCRIBERS ---
-        self.create_subscription(Imu, '/imu/diff', self.callback_imu_diff, 10)
-        self.create_subscription(Float32, '/imu/pitch', self.callback_pitch, 10)
+        self.create_subscription(Imu, '/imu/data_raw', self.callback_imu, 10)
+        self.create_subscription(Float32, '/gps/speed_kmph', self.callback_velocity, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.callback_gnss, 10)
-        self.create_subscription(Float32, '/wheel_speed', self.callback_wheel, 10)
-        
+        self.create_subscription(Float32, '/imu/mag_heading', self.callback_mag_init, 10)
+
         # --- PUBLISHERS ---
         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 50)
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, '/pose/ekf', 20)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        self.last_imu_time   = None
-        self.last_gps_time   = None
-        self.last_wheel_time = None
+        self.get_logger().info("--- EKF STARTED: Waiting for MAG (Yaw) + GPS (Pos) ---")
 
-        self.IMU_TIMEOUT   = 0.1 
-        self.GPS_TIMEOUT   = 1.0
-        self.WHEEL_TIMEOUT = 0.2
+    # 1. INIT YAW (Magnetometer)
+    def callback_mag_init(self, msg):
+        if self.mag_initialized: return
 
-        self.filter_ready = False
-        self.last_pitch_time = None
+        compass_angle_deg = msg.data
+        # Convert Compass (CW from North) to ENU (CCW from East)
+        yaw_enu = radians(90.0 - compass_angle_deg)
+        yaw_enu = atan2(sin(yaw_enu), cos(yaw_enu))
 
-        self.get_logger().info("--- EKF STARTED: WHEEL + GPS + IMU FUSION ---")
-
-    def callback_pitch(self, msg): 
-        self.current_pitch = msg.data
-        self.last_pitch_time = self.get_clock().now().nanoseconds * 1e-9
-
-    # def callback_wheel(self, msg):
-    #     self.last_wheel_time = self.get_clock().now().nanoseconds * 1e-9
-    #     speed = msg.data
-    #     now = self.get_clock().now().nanoseconds * 1e-9
+        self.ekf.state[2] = yaw_enu
+        self.ekf.is_yaw_initialized = True
+        self.mag_initialized = True
         
-    #     # Check IMU timeout
-    #     if self.last_imu_time and (now - self.last_imu_time) > self.IMU_TIMEOUT:
-    #         return
+        self.check_filter_ready()
+        self.get_logger().info(f"✅ MAG INIT: Heading set to {degrees(yaw_enu):.1f}°")
 
-    #     var_speed = 0.1 ** 2 
-    #     self.ekf.update_wheel_speed(speed, var_speed)
-    def callback_wheel(self, msg):
-        self.last_wheel_time = self.get_clock().now().nanoseconds * 1e-9
-        speed = msg.data
-        now = self.get_clock().now().nanoseconds * 1e-9
-        
-        # Check IMU timeout
-        if self.last_imu_time and (now - self.last_imu_time) > self.IMU_TIMEOUT:
-            return
-
-        # --- SLIP DETECTION START ---
-        # 1. Compare Wheel Speed vs. EKF Predicted Speed
-        predicted_speed = self.ekf.state[3]
-        
-        # 2. Threshold: 1.0 m/s difference is impossible in 0.02s (That's 50m/s^2 accel)
-        if abs(speed - predicted_speed) > 1.0:
-            # self.get_logger().warn(f"SLIP REJECTED: Wheel={speed:.1f}, EKF={predicted_speed:.1f}", throttle_duration_sec=1.0)
-            return
-        # --- SLIP DETECTION END ---
-
-        var_speed = 0.1 ** 2 
-        self.ekf.update_wheel_speed(speed, var_speed)
-
+    # 2. GPS HANDLER (Position Update + Init)
     def callback_gnss(self, msg):
-        # 1. FIX: Calculate 'now' FIRST
-        now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        
-        # 2. FIX: Update last_gps_time AFTER using 'now'
-        self.last_gps_time = now
-
         x_gps = msg.pose.pose.position.x
         y_gps = msg.pose.pose.position.y
         var_x = msg.pose.covariance[0]
         var_y = msg.pose.covariance[7]
-        
-        # Initialization
-        if not self.ekf.is_yaw_initialized:
-            if self.ekf.check_alignment(x_gps, y_gps, now):
-                self.filter_ready = True
-                self.get_logger().info(f"ALIGNED! Heading: {degrees(self.ekf.state[2]):.1f}")
-            else:
-                self.get_logger().info(f"CALIBRATING... Drive 5m", throttle_duration_sec=1.0)
+
+        # [NEW] Initialize Position if not done yet
+        if not self.gps_initialized:
+            self.ekf.state[0] = x_gps
+            self.ekf.state[1] = y_gps
+            self.gps_initialized = True
+            self.check_filter_ready()
+            self.get_logger().info(f"✅ GPS INIT: Position set to X:{x_gps:.1f}, Y:{y_gps:.1f}")
             return
 
-        # Position Update
+        if not self.filter_ready: return
+
+        # Standard Update
         R_gps = np.diag([var_x, var_y]) * 3.0
         self.ekf.update_gps(x_gps, y_gps, R_gps)
 
-        if self.last_imu_time is None:
-            return
+    # 3. VELOCITY HANDLER
+    def callback_velocity(self, msg):
+        # Incoming is km/h, convert to m/s
+        speed_mps = msg.data / 3.6
+        self.current_gps_speed = speed_mps
 
-        # Heading Drift Correction
-        if self.ekf.last_gps_x is not None:
-            dx = x_gps - self.ekf.last_gps_x
-            dy = y_gps - self.ekf.last_gps_y
-            dt = now - self.ekf.last_gps_time
-            dist = sqrt(dx*dx + dy*dy)
+        if not self.filter_ready: return
 
-            if dt > 0 and dist > 0.5:
-                speed_gps = dist / dt
-                if speed_gps > 1.0:
-                    yaw_gps = atan2(dy, dx)
-                    self.ekf.update_gps_heading(yaw_gps, 5.0)
+        # [CHANGE] CRUSH THE VARIANCE. Trust GPS speed highly.
+        # This forces the EKF to stick to the green dots in your plot.
+        var_speed = 0.05 ** 2 
+        
+        self.ekf.update_wheel_speed(speed_mps, var_speed)
 
-        self.ekf.last_gps_x = x_gps
-        self.ekf.last_gps_y = y_gps
-        self.ekf.last_gps_time = now
-
-    def callback_imu_diff(self, msg):
+    # 4. PREDICTION STEP (The Core Fix)
+    def callback_imu(self, msg: Imu):
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self.last_imu_time = now
 
         if self.last_msg_time is None: self.last_msg_time = now; return
         dt = now - self.last_msg_time
         self.last_msg_time = now
-        if dt <= 0: return
+        if dt <= 0 or not self.filter_ready: return
 
-        if not self.filter_ready:
-            return
-        
-        # 3. FIX: Define accel_raw BEFORE checking pitch time
+        # --- A. GRAVITY COMPENSATION ---
+        q = msg.orientation
+        sin_p = 2 * (q.w * q.y - q.z * q.x)
+        if abs(sin_p) >= 1: current_pitch = math.copysign(pi / 2, sin_p)
+        else: current_pitch = asin(sin_p)
+
         accel_raw = msg.linear_acceleration.x
         yaw_rate  = msg.angular_velocity.z
+        
+        # Calculate Net Accel (Kinematic)
+        accel_net = accel_raw - (9.81 * sin(current_pitch)) 
 
-        # Check for stale pitch data
-        if self.last_pitch_time is None or (now - self.last_pitch_time) > 0.2:
-            accel_net = accel_raw
-        else:
-            accel_net = accel_raw + (9.81 * sin(self.current_pitch)) - ((yaw_rate**2) * self.ROTATION_RADIUS)
-        
-        if abs(accel_net) < 0.05: accel_net = 0.0
-        
+        # [CHANGE] Disable Centripetal if noisy.
+        # If yaw_rate is noisy, this term explodes. Uncomment only if IMU is high-end.
+        # accel_net = accel_net - ((yaw_rate ** 2) * self.ROTATION_RADIUS)
+
+        # [CHANGE] Deadzone & Stationary Check
+        # 1. If GPS says we are stopped, FORCE accel to 0
+        if self.current_gps_speed < 0.2:
+            accel_net = 0.0
+            # Optional: decay velocity to 0 slowly
+            self.ekf.state[3] *= 0.9 
+        # 2. If accel is small (vibration), ignore it
+        elif abs(accel_net) < 0.3: 
+            accel_net = 0.0
+
+        # Predict
         self.ekf.predict(accel_net, yaw_rate, dt)
+
+        # [CHANGE] Safety Clamp on Resulting Velocity
+        # Prevent the "20 m/s" explosion
+        if self.ekf.state[3] > self.MAX_SPEED_MPS:
+            self.ekf.state[3] = self.MAX_SPEED_MPS
+        elif self.ekf.state[3] < -self.MAX_SPEED_MPS:
+            self.ekf.state[3] = -self.MAX_SPEED_MPS
+
         self.publish_odometry(msg.header.stamp)
+
+    def check_filter_ready(self):
+        if self.mag_initialized and self.gps_initialized and not self.filter_ready:
+            self.filter_ready = True
+            self.get_logger().info("🚀 ALL SYSTEMS GO: EKF Prediction Enabled!")
 
     def publish_odometry(self, stamp):
         s = self.ekf.state
@@ -683,20 +885,6 @@ class EKFNode(Node):
         o.pose.pose.orientation = t.transform.rotation
         o.twist.twist.linear.x, o.twist.twist.angular.z = s[3], s[4]
         self.pub_odom.publish(o)
-        
-        p = PoseWithCovarianceStamped()
-        p.header = o.header; p.pose.pose = o.pose.pose
-        
-        for i in range(36): p.pose.covariance[i] = 0.0
-
-        p.pose.covariance[0]  = self.ekf.P[0,0]   # x
-        p.pose.covariance[7]  = self.ekf.P[1,1]   # y
-        p.pose.covariance[35] = self.ekf.P[2,2]   # yaw
-        p.pose.covariance[14] = 999.0  # z
-        p.pose.covariance[21] = 999.0  # roll
-        p.pose.covariance[28] = 999.0  # pitch
-
-        self.pub_pose.publish(p)
 
 def main(args=None):
     rclpy.init(args=args)
