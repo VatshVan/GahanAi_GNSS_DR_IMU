@@ -158,8 +158,8 @@ def generate_launch_description():
         # 2. GNSS BRIDGE
         Node(
             package=pkg_name,
-            executable='gnss_node',
-            name='gnss_node',
+            executable='gps_bridge',
+            name='gps_bridge',
             output='screen',
             parameters=[{'port': '/dev/ttyUSB0', 'baud': 115200}]
         ),

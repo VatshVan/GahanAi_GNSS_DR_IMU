@@ -1,2 +1,0 @@
-[console_scripts]
-ekf_node = state_estimator.ekf_ros_node:main
