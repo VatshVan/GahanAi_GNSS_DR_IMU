@@ -1,151 +1,280 @@
-"""
-ekf_core.py
+# """
+# ekf_core.py
 
-Extended Kalman Filter for a ground vehicle with state:
-    x = [px, py, yaw, v]^T
+# Extended Kalman Filter for a ground vehicle with state:
+#     x = [px, py, yaw, v]^T
 
-Predict step uses IMU yaw-rate (omega) as control input (no control acceleration).
-Measurements supported:
-    - GPS: [px, py]
-    - Wheel speed: v
+# Predict step uses IMU yaw-rate (omega) as control input (no control acceleration).
+# Measurements supported:
+#     - GPS: [px, py]
+#     - Wheel speed: v
 
-Usage:
-    from ekf_core import EKF
-    ekf = EKF()
-    ekf.predict(omega, dt)
-    ekf.update_gps(np.array([x_meas, y_meas]), R=...)
-    ekf.update_wheel(v_meas, R=...)
-"""
+# Usage:
+#     from ekf_core import EKF
+#     ekf = EKF()
+#     ekf.predict(omega, dt)
+#     ekf.update_gps(np.array([x_meas, y_meas]), R=...)
+#     ekf.update_wheel(v_meas, R=...)
+# """
+
+# import numpy as np
+
+# class EKF:
+#     def __init__(self,
+#                  x0=None,
+#                  P0=None,
+#                  Q=None,
+#                  R_gps=None,
+#                  R_wheel=None):
+#         # State: [px, py, yaw, v]
+#         if x0 is None:
+#             self.x = np.zeros(4, dtype=float)
+#         else:
+#             self.x = x0.astype(float)
+
+#         if P0 is None:
+#             self.P = np.diag([1.0, 1.0, 0.5**2, 1.0])  # initial covariance
+#         else:
+#             self.P = P0.astype(float)
+
+#         # Process noise covariance
+#         if Q is None:
+#             # small uncertainty in position process (due to modeling), yaw, and v
+#             self.Q = np.diag([0.01, 0.01, (np.deg2rad(1.0))**2, 0.1**2])
+#         else:
+#             self.Q = Q.astype(float)
+
+#         # Measurement covariances
+#         if R_gps is None:
+#             self.R_gps = np.diag([1.5**2, 1.5**2])  # meters^2
+#         else:
+#             self.R_gps = R_gps.astype(float)
+
+#         if R_wheel is None:
+#             self.R_wheel = np.array([[0.2**2]])  # (m/s)^2
+#         else:
+#             self.R_wheel = np.atleast_2d(R_wheel).astype(float)
+
+#     def predict(self, omega, dt):
+#         """
+#         EKF predict step using control input omega (yaw rate from IMU).
+#         Model:
+#             px' = px + v*dt*cos(yaw)
+#             py' = py + v*dt*sin(yaw)
+#             yaw' = yaw + omega*dt
+#             v' = v
+#         """
+#         px, py, yaw, v = self.x
+
+#         # Predict state
+#         px_pred = px + v * dt * np.cos(yaw)
+#         py_pred = py + v * dt * np.sin(yaw)
+#         yaw_pred = yaw + omega * dt
+#         v_pred = v
+
+#         # Normalize yaw_pred to [-pi, pi]
+#         yaw_pred = (yaw_pred + np.pi) % (2 * np.pi) - np.pi
+
+#         self.x = np.array([px_pred, py_pred, yaw_pred, v_pred])
+
+#         # Jacobian F = df/dx (4x4)
+#         F = np.eye(4)
+#         # ∂px/∂yaw = -v*dt*sin(yaw)
+#         F[0,2] = -v * dt * np.sin(yaw)
+#         # ∂px/∂v = dt*cos(yaw)
+#         F[0,3] = dt * np.cos(yaw)
+
+#         # ∂py/∂yaw = v*dt*cos(yaw)
+#         F[1,2] = v * dt * np.cos(yaw)
+#         # ∂py/∂v = dt*sin(yaw)
+#         F[1,3] = dt * np.sin(yaw)
+
+#         # ∂yaw/∂yaw = 1 (already)
+#         # ∂v/∂v = 1
+
+#         # Covariance predict
+#         self.P = F @ self.P @ F.T + self.Q
+
+#     def update_gps(self, z, R=None):
+#         """
+#         GPS update with measurement z = [px_meas, py_meas].
+#         Linear measurement: H = [[1,0,0,0],[0,1,0,0]]
+#         """
+#         if R is None:
+#             R = self.R_gps
+
+#         H = np.zeros((2,4))
+#         H[0,0] = 1.0
+#         H[1,1] = 1.0
+
+#         z = np.asarray(z).reshape(2)
+
+#         y = z - H @ self.x  # innovation
+
+#         S = H @ self.P @ H.T + R
+#         K = self.P @ H.T @ np.linalg.inv(S)
+
+#         self.x = self.x + K @ y
+#         # Ensure yaw stays normalized
+#         self.x[2] = (self.x[2] + np.pi) % (2 * np.pi) - np.pi
+
+#         I = np.eye(4)
+#         self.P = (I - K @ H) @ self.P
+
+#     def update_wheel(self, v_meas, R=None):
+#         """
+#         Wheel speed update with scalar measurement v_meas.
+#         H = [0,0,0,1]
+#         """
+#         if R is None:
+#             R = self.R_wheel
+
+#         H = np.array([[0.0, 0.0, 0.0, 1.0]])
+#         z = np.atleast_1d(v_meas).astype(float)
+
+#         y = z - (H @ self.x).reshape(-1)
+
+#         S = H @ self.P @ H.T + R
+#         K = self.P @ H.T @ np.linalg.inv(S)
+
+#         self.x = self.x + (K @ y).flatten()
+#         # normalize yaw
+#         self.x[2] = (self.x[2] + np.pi) % (2 * np.pi) - np.pi
+
+#         I = np.eye(4)
+#         self.P = (I - K @ H) @ self.P
+
+#     def get_state(self):
+#         return self.x.copy()
+
+#     def get_cov(self):
+#         return self.P.copy()
+
+
+
+
+
+
+
+
+
 
 import numpy as np
+from math import sin, cos, atan2, sqrt, pi
+
+def normalize_angle(a):
+    return (a + pi) % (2 * pi) - pi
 
 class EKF:
-    def __init__(self,
-                 x0=None,
-                 P0=None,
-                 Q=None,
-                 R_gps=None,
-                 R_wheel=None):
-        # State: [px, py, yaw, v]
-        if x0 is None:
-            self.x = np.zeros(4, dtype=float)
-        else:
-            self.x = x0.astype(float)
+    X, Y, YAW, V, YAW_RATE = 0, 1, 2, 3, 4
 
-        if P0 is None:
-            self.P = np.diag([1.0, 1.0, 0.5**2, 1.0])  # initial covariance
-        else:
-            self.P = P0.astype(float)
+    def __init__(self):
+        self.state = np.zeros(5)
+        
+        # Initial Uncertainty
+        self.P = np.diag([1.0, 1.0, 0.5, 1.0, 0.1])
 
-        # Process noise covariance
-        if Q is None:
-            # small uncertainty in position process (due to modeling), yaw, and v
-            self.Q = np.diag([0.01, 0.01, (np.deg2rad(1.0))**2, 0.1**2])
-        else:
-            self.Q = Q.astype(float)
+        # --- TUNING FOR REAL LIFE ---
+        self.Q = np.diag([
+            0.05,   # X: Flexible
+            0.05,   # Y: Flexible
+            0.001,  # Yaw: Trust Gyro heavily (Stiff)
+            0.1,    # Velocity: Allow changes from Wheel Odom
+            0.02    # Yaw Rate: Slow gyro bias drift
+        ])
 
-        # Measurement covariances
-        if R_gps is None:
-            self.R_gps = np.diag([1.5**2, 1.5**2])  # meters^2
-        else:
-            self.R_gps = R_gps.astype(float)
+        # Alignment
+        self.is_yaw_initialized = False
+        self.start_gps_x = None
+        self.start_gps_y = None
+        self.start_gps_time = None
+        self.min_align_distance = 5.0
+        
+        self.last_gps_x = None
+        self.last_gps_y = None
+        self.last_gps_time = None
 
-        if R_wheel is None:
-            self.R_wheel = np.array([[0.2**2]])  # (m/s)^2
-        else:
-            self.R_wheel = np.atleast_2d(R_wheel).astype(float)
+    def predict(self, accel_fwd, yaw_rate_meas, dt):
+        x, y, yaw, v, _ = self.state
 
-    def predict(self, omega, dt):
-        """
-        EKF predict step using control input omega (yaw rate from IMU).
-        Model:
-            px' = px + v*dt*cos(yaw)
-            py' = py + v*dt*sin(yaw)
-            yaw' = yaw + omega*dt
-            v' = v
-        """
-        px, py, yaw, v = self.x
+        yaw_new = normalize_angle(yaw + yaw_rate_meas * dt)
+        v_new = v + accel_fwd * dt
+        v_new = np.clip(v_new, -20.0, 20.0)
 
-        # Predict state
-        px_pred = px + v * dt * np.cos(yaw)
-        py_pred = py + v * dt * np.sin(yaw)
-        yaw_pred = yaw + omega * dt
-        v_pred = v
+        x_new = x + v * cos(yaw) * dt
+        y_new = y + v * sin(yaw) * dt
 
-        # Normalize yaw_pred to [-pi, pi]
-        yaw_pred = (yaw_pred + np.pi) % (2 * np.pi) - np.pi
+        self.state = np.array([x_new, y_new, yaw_new, v_new, yaw_rate_meas])
 
-        self.x = np.array([px_pred, py_pred, yaw_pred, v_pred])
+        F = np.eye(5)
+        F[0, 2] = -v * sin(yaw) * dt
+        F[0, 3] = cos(yaw) * dt
+        F[1, 2] = v * cos(yaw) * dt
+        F[1, 3] = sin(yaw) * dt
+        F[4, 4] = 0 
 
-        # Jacobian F = df/dx (4x4)
-        F = np.eye(4)
-        # ∂px/∂yaw = -v*dt*sin(yaw)
-        F[0,2] = -v * dt * np.sin(yaw)
-        # ∂px/∂v = dt*cos(yaw)
-        F[0,3] = dt * np.cos(yaw)
+        self.P = F @ self.P @ F.T + self.Q * dt
 
-        # ∂py/∂yaw = v*dt*cos(yaw)
-        F[1,2] = v * dt * np.cos(yaw)
-        # ∂py/∂v = dt*sin(yaw)
-        F[1,3] = dt * np.sin(yaw)
+    def correct(self, z, R, update_vector):
+        idxs = [i for i, val in enumerate(update_vector) if val]
+        if not idxs: return
 
-        # ∂yaw/∂yaw = 1 (already)
-        # ∂v/∂v = 1
+        z_sub = z[idxs]
+        x_sub = self.state[idxs]
+        
+        H = np.zeros((len(idxs), 5))
+        for i, original_idx in enumerate(idxs):
+            H[i, original_idx] = 1.0
+            
+        y = z_sub - x_sub
+        if 2 in idxs: # Yaw Wrap
+            idx_in_y = idxs.index(2)
+            y[idx_in_y] = normalize_angle(y[idx_in_y])
 
-        # Covariance predict
-        self.P = F @ self.P @ F.T + self.Q
+        S = H @ self.P @ H.T + R[np.ix_(idxs, idxs)]
+        try:
+            K = self.P @ H.T @ np.linalg.inv(S)
+        except: return
 
-    def update_gps(self, z, R=None):
-        """
-        GPS update with measurement z = [px_meas, py_meas].
-        Linear measurement: H = [[1,0,0,0],[0,1,0,0]]
-        """
-        if R is None:
-            R = self.R_gps
+        self.state += K @ y
+        self.state[2] = normalize_angle(self.state[2])
+        self.P = (np.eye(5) - K @ H) @ self.P
 
-        H = np.zeros((2,4))
-        H[0,0] = 1.0
-        H[1,1] = 1.0
+    def check_alignment(self, x_gps, y_gps, current_time):
+        if self.start_gps_x is None:
+            self.start_gps_x = x_gps
+            self.start_gps_y = y_gps
+            self.start_gps_time = current_time
+            return False
 
-        z = np.asarray(z).reshape(2)
+        dx = x_gps - self.start_gps_x
+        dy = y_gps - self.start_gps_y
+        dist = sqrt(dx*dx + dy*dy)
 
-        y = z - H @ self.x  # innovation
+        if dist > self.min_align_distance:
+            heading = atan2(dy, dx)
+            # Init state
+            self.state[0] = x_gps
+            self.state[1] = y_gps
+            self.state[2] = heading
+            self.state[3] = 0.0 
+            self.is_yaw_initialized = True
+            return True
+        return False
 
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
+    def update_gps(self, x, y, R_mat):
+        z = np.zeros(5); z[0] = x; z[1] = y
+        self.correct(z, R_mat, [True, True, False, False, False])
 
-        self.x = self.x + K @ y
-        # Ensure yaw stays normalized
-        self.x[2] = (self.x[2] + np.pi) % (2 * np.pi) - np.pi
+    def update_gps_heading(self, yaw, var):
+        z = np.zeros(5); z[2] = yaw
+        R = np.zeros((5,5)); R[2,2] = var
+        self.correct(z, R, [False, False, True, False, False])
 
-        I = np.eye(4)
-        self.P = (I - K @ H) @ self.P
-
-    def update_wheel(self, v_meas, R=None):
-        """
-        Wheel speed update with scalar measurement v_meas.
-        H = [0,0,0,1]
-        """
-        if R is None:
-            R = self.R_wheel
-
-        H = np.array([[0.0, 0.0, 0.0, 1.0]])
-        z = np.atleast_1d(v_meas).astype(float)
-
-        y = z - (H @ self.x).reshape(-1)
-
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = self.x + (K @ y).flatten()
-        # normalize yaw
-        self.x[2] = (self.x[2] + np.pi) % (2 * np.pi) - np.pi
-
-        I = np.eye(4)
-        self.P = (I - K @ H) @ self.P
-
-    def get_state(self):
-        return self.x.copy()
-
-    def get_cov(self):
-        return self.P.copy()
+    def update_wheel_speed(self, speed, var):
+        z = np.zeros(5); z[3] = speed
+        R = np.zeros((5,5)); R[3,3] = var
+        # Update Velocity (Index 3)
+        self.correct(z, R, [False, False, False, True, False])
+        
+    def get_current_state(self): return self.state
