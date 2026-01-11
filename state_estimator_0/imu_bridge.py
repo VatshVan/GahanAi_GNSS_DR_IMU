@@ -82,7 +82,7 @@ class DiffIMUBridge(Node):
                 self.sock.close()
             
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(0.1) # Short timeout for non-blocking feel
+            self.sock.settimeout(1.0) # Short timeout for non-blocking feel
             self.sock.connect((self.esp_ip, self.esp_port))
             
             # Create a file-like object for easy readline() usage
@@ -111,7 +111,7 @@ class DiffIMUBridge(Node):
                 
             raw_line = raw_line.strip()
             if not raw_line: return 
-            
+            self.get_logger().info(f"Data: {raw_line}")
             data_parts = raw_line.split(',')
             if len(data_parts) != 12: return
             

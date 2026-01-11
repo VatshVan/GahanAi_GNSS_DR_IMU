@@ -889,7 +889,13 @@ import numpy as np
 import math
 
 # Make sure this import matches your file structure
-from .ekf_core import EKF 
+# from .ekf_core import EKF 
+try:
+    # Try importing as a ROS package (Relative import)
+    from .ekf_core import EKF
+except ImportError:
+    # Fallback if running as a generic script (Absolute import)
+    from ekf_core import EKF
 
 class EKFNode(Node):
     def __init__(self):

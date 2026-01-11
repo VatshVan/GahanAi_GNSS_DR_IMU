@@ -4,108 +4,109 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from mpl_toolkits.mplot3d import Axes3D
 from collections import deque
 import threading
 import numpy as np
 
-class VehicleVisualizer(Node):
+class VehicleVisualizer3D(Node):
     def __init__(self):
-        super().__init__('vehicle_visualizer')
+        super().__init__('vehicle_visualizer_3d')
         
         # --- CONFIGURATION ---
-        self.HISTORY_LEN = 1000  # Keep last 1000 points (prevent lag)
+        self.HISTORY_LEN = 1000  # Keep last 1000 points
         
         # --- DATA STORAGE ---
         self.x_data = deque(maxlen=self.HISTORY_LEN)
         self.y_data = deque(maxlen=self.HISTORY_LEN)
-        self.v_data = deque(maxlen=self.HISTORY_LEN)
-        self.t_data = deque(maxlen=self.HISTORY_LEN)
+        self.z_data = deque(maxlen=self.HISTORY_LEN)
         
-        self.start_time = None
-
+        # State for Arrow/Marker
+        self.cur_x = 0.0; self.cur_y = 0.0; self.cur_z = 0.0
+        self.cur_u = 1.0; self.cur_v = 0.0; self.cur_w = 0.0
+        
         # --- SUBSCRIBER ---
-        # We listen to the EKF output
         self.create_subscription(Odometry, '/odometry/ekf', self.odom_callback, 10)
-        
-        self.get_logger().info("Visualizer Started. Waiting for EKF data...")
+        self.get_logger().info("3D Visualizer Started. Waiting for Data...")
 
     def odom_callback(self, msg):
-        # 1. Get Time
-        now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.start_time is None:
-            self.start_time = now
-        
-        elapsed = now - self.start_time
-        
-        # 2. Get Position
+        # 1. Position
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
+        z = msg.pose.pose.position.z
         
-        # 3. Get Velocity (Linear X is forward speed)
-        v = msg.twist.twist.linear.x * 3.6 # Convert m/s to km/h
+        # 2. Orientation (Quaternion -> Direction Vector)
+        q = msg.pose.pose.orientation
+        # Rotate [1,0,0] by quaternion to get forward vector
+        ux = 1 - 2 * (q.y**2 + q.z**2)
+        uy = 2 * (q.x*q.y + q.w*q.z)
+        uz = 2 * (q.x*q.z - q.w*q.y)
 
-        # 4. Store
-        self.t_data.append(elapsed)
+        # 3. Store Data
         self.x_data.append(x)
         self.y_data.append(y)
-        self.v_data.append(v)
+        self.z_data.append(z)
+        
+        # 4. Update Current State
+        self.cur_x, self.cur_y, self.cur_z = x, y, z
+        self.cur_u, self.cur_v, self.cur_w = ux, uy, uz
 
-# --- PLOTTING FUNCTION ---
-def animate(i, node, line_path, line_speed, ax_map, ax_speed):
-    if len(node.x_data) == 0:
-        return line_path, line_speed
+# --- ANIMATION FUNCTION ---
+def animate(i, node, ln_path, quiver, ax_3d):
+    if len(node.x_data) == 0: return ln_path
 
-    # 1. Update Path (Map)
-    line_path.set_data(node.x_data, node.y_data)
+    # --- UPDATE 3D TRAJECTORY ---
+    ln_path.set_data(node.x_data, node.y_data)
+    ln_path.set_3d_properties(node.z_data)
     
-    # Adjust Map Limits dynamically
-    ax_map.set_xlim(min(node.x_data)-5, max(node.x_data)+5)
-    ax_map.set_ylim(min(node.y_data)-5, max(node.y_data)+5)
-
-    # 2. Update Speed Graph
-    line_speed.set_data(node.t_data, node.v_data)
+    # --- UPDATE ARROW ---
+    global global_quiver
+    if global_quiver: global_quiver.remove()
     
-    # Adjust Speed Limits
-    if len(node.t_data) > 0:
-        ax_speed.set_xlim(min(node.t_data), max(node.t_data) + 1)
-        ax_speed.set_ylim(0, max(max(node.v_data), 10) + 2) # Auto-scale Y, min 10 km/h
+    global_quiver = ax_3d.quiver(
+        node.cur_x, node.cur_y, node.cur_z,
+        node.cur_u, node.cur_v, node.cur_w,
+        length=2.0, color='red', linewidth=2
+    )
 
-    return line_path, line_speed
+    # --- CENTER CAMERA ---
+    w = 75 # View window size (User Preference)
+    ax_3d.set_xlim(node.cur_x - w, node.cur_x + w)
+    ax_3d.set_ylim(node.cur_y - w, node.cur_y + w)
+    ax_3d.set_zlim(node.cur_z - 2, node.cur_z + 8)
+
+    return ln_path
+
+global_quiver = None
 
 def main():
-    # 1. Start ROS in a separate thread (so it doesn't block the GUI)
     rclpy.init()
-    node = VehicleVisualizer()
+    node = VehicleVisualizer3D()
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
 
-    # 2. Setup Matplotlib
-    fig, (ax_map, ax_speed) = plt.subplots(2, 1, figsize=(8, 10))
-    fig.suptitle("Vehicle Live Dashboard")
+    # Create Figure (Single 3D Plot)
+    fig = plt.figure(figsize=(10, 8))
+    
+    ax_3d = fig.add_subplot(1, 1, 1, projection='3d')
+    ax_3d.set_title("3D Vehicle Trajectory")
+    ax_3d.set_xlabel("X (East)")
+    ax_3d.set_ylabel("Y (North)")
+    ax_3d.set_zlabel("Z (Up)")
+    
+    # Initialize Line
+    ln_path, = ax_3d.plot([], [], [], 'b-', lw=1, alpha=0.6)
+    
+    # Dummy arrow for initialization
+    global global_quiver
+    global_quiver = ax_3d.quiver(0,0,0, 1,0,0, length=1)
 
-    # --- TOP PLOT: TRAJECTORY ---
-    ax_map.set_title("Live Position (GPS/EKF Path)")
-    ax_map.set_xlabel("East (m)")
-    ax_map.set_ylabel("North (m)")
-    ax_map.grid(True)
-    ax_map.axis('equal') # Keep aspect ratio square so map looks real
-    line_path, = ax_map.plot([], [], 'b-', lw=2, label='Trajectory')
-    ax_map.legend()
-
-    # --- BOTTOM PLOT: SPEED ---
-    ax_speed.set_title("Speed Profile")
-    ax_speed.set_xlabel("Time (s)")
-    ax_speed.set_ylabel("Speed (km/h)")
-    ax_speed.grid(True)
-    line_speed, = ax_speed.plot([], [], 'r-', lw=2, label='Speed')
-
-    # 3. Start Animation Loop (Updates every 100ms)
+    # Start Animation
     ani = animation.FuncAnimation(
-        fig, animate, fargs=(node, line_path, line_speed, ax_map, ax_speed),
+        fig, animate, fargs=(node, ln_path, global_quiver, ax_3d),
         interval=100, blit=False
     )
 
-    # 4. Show Window
     try:
         plt.show()
     except KeyboardInterrupt:

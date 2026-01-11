@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-GNSS Bridge Node (WiFi Version + Velocity)
-==========================================
-Reads NMEA data from an ESP32 TCP stream (default 192.168.4.1:8889).
-Parses GGA (Position) and RMC (Speed + Course).
-Publishes:
-  - /gnss/fix (Raw Fix)
-  - /gps/enu_pose (Odometry/Pose)
-  - /gps/speed_kmph (Scalar Speed for EKF Main)
-  - /gps/fix_velocity (Vector Velocity for EKF Validation) <--- NEW
+GNSS Bridge Node (WiFi Version + Debug Print)
+=============================================
+- Prints Lat/Lon to terminal.
+- Prevents "Connected" spam.
 """
 
 import rclpy
@@ -45,8 +40,6 @@ class GNSSNode(Node):
         self.fix_pub = self.create_publisher(NavSatFix, '/gnss/fix', sensor_qos)
         self.enu_pub = self.create_publisher(PoseWithCovarianceStamped, '/gps/enu_pose', sensor_qos)
         self.speed_pub = self.create_publisher(Float32, '/gps/speed_kmph', sensor_qos)
-        
-        # NEW: Vector Velocity Publisher
         self.vel_pub = self.create_publisher(TwistWithCovarianceStamped, '/gps/fix_velocity', sensor_qos)
 
         # --- CARTESIAN CONVERSION STATE ---
@@ -83,8 +76,11 @@ class GNSSNode(Node):
         self.get_logger().info(f"GNSS Bridge Started. Target: {self.esp_ip}:{self.esp_port}")
 
     def connect_to_esp(self):
+        # FIX: Only connect if we are currently disconnected
+        if self.sock is not None:
+            return
+
         try:
-            if self.sock: self.sock.close()
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(0.1)
             self.sock.connect((self.esp_ip, self.esp_port))
@@ -92,11 +88,13 @@ class GNSSNode(Node):
             self.get_logger().info("Connected to ESP32 GPS Stream!")
         except Exception:
             self.sock = None
+            self.get_logger().warn("Not Connected to ESP32 GPS Stream!")
+            # Quiet fail - don't spam errors every 0.05s
 
     def read_socket_data(self):
         if self.sock is None: 
             self.connect_to_esp()
-            return
+            # return
 
         try:
             line = self.sock_file.readline()
@@ -110,39 +108,29 @@ class GNSSNode(Node):
                 self.parse_rmc(line)
 
         except (socket.timeout, ConnectionResetError, BrokenPipeError, OSError):
-            self.sock = None
+            self.sock = None # Trigger reconnect next loop
 
     def parse_rmc(self, line):
-        # Format: $GNRMC,time,status,lat,NS,lon,EW,speed_knots,course,date...
         parts = line.split(',')
-        if len(parts) < 9: return # Need at least up to course
+        if len(parts) < 9: return
         
         try:
-            # Check Status (A=Active)
             if parts[2] != 'A': return
 
-            # 1. Parse Speed (Knots)
             speed_knots_str = parts[7]
             if not speed_knots_str: return
             speed_knots = float(speed_knots_str)
             
-            # Conversions
             speed_kmph = speed_knots * 1.852
             speed_mps  = speed_knots * 0.514444
 
-            # 2. Parse Course (Degrees True)
             course_deg_str = parts[8]
             course_deg = float(course_deg_str) if course_deg_str else 0.0
             
-            # --- PUBLISH SCALAR SPEED (For EKF Main) ---
             msg_speed = Float32()
             msg_speed.data = speed_kmph
             self.speed_pub.publish(msg_speed)
 
-            # --- PUBLISH VECTOR VELOCITY (For EKF Validation) ---
-            # Convert Course (Clockwise from North) to ENU (East/North) components
-            # Vx (East)  = Speed * sin(course)
-            # Vy (North) = Speed * cos(course)
             course_rad = math.radians(course_deg)
             vx = speed_mps * math.sin(course_rad)
             vy = speed_mps * math.cos(course_rad)
@@ -150,17 +138,12 @@ class GNSSNode(Node):
             vel_msg = TwistWithCovarianceStamped()
             vel_msg.header.stamp = self.get_clock().now().to_msg()
             vel_msg.header.frame_id = self.frame_id
-            
             vel_msg.twist.twist.linear.x = vx
             vel_msg.twist.twist.linear.y = vy
             vel_msg.twist.twist.linear.z = 0.0
-
-            # Covariance (We trust GPS speed moderately)
-            # Diagonal: [x, y, z, roll, pitch, yaw]
-            # Speed from RMC is usually decent, assign variance ~0.25 (0.5m/s error)
+            
             cov = [0.0] * 36
-            cov[0] = 0.25 # Var X
-            cov[7] = 0.25 # Var Y
+            cov[0] = 0.25; cov[7] = 0.25
             vel_msg.twist.covariance = cov
 
             self.vel_pub.publish(vel_msg)
@@ -202,9 +185,11 @@ class GNSSNode(Node):
         return degrees + (minutes / 60.0)
 
     def publish_fix_and_enu(self, lat, lon, alt, quality, hdop):
+        # --- NEW: Print Lat/Lon to Console ---
+        print(f"LAT: {lat:.6f}, LON: {lon:.6f}, Quality: {quality}")
+        
         current_time = self.get_clock().now().to_msg()
         
-        # Variance calc
         base_error = 2.5
         if quality == 4: base_error = 0.02
         elif quality == 5: base_error = 0.5
