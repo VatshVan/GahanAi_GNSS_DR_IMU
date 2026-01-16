@@ -1,43 +1,65 @@
-# ekf_node:
-#   ros__parameters:
+# -----------------------------------------------------------------------------
+# AUTONOMOUS VEHICLE STATE ESTIMATION CONFIGURATION
+# -----------------------------------------------------------------------------
 
-#     # ---- TOPICS (must match ekf_node.py) ----
-#     imu_topic: "/imu/diff"
-#     odom_topic: "/wheel_odom"
-#     gps_fix_topic: "/gps/fix"
-#     gps_speed_topic: "/gps/speed_mps"
-#     ekf_odom_topic: "/odometry/ekf"
-
-#     odom_frame_id: "odom"
-#     base_frame_id: "base_link"
-
-#     # ---- INITIAL COVARIANCE (px, py, yaw, v) ----
-#     initial_covariance: [10.0, 10.0, 0.5, 5.0]
-
-#     # ---- PROCESS NOISE (px, py, yaw, v) ----
-#     Q_process: [0.5, 0.5, 0.02, 1.0]
-
-#     # ---- MEASUREMENT NOISE ----
-#     R_gps: [5.0, 5.0]
-#     R_speed: 0.5
-
-
-ekf_node:
+# --- 1. GNSS BRIDGE ---
+/gps_bridge:
   ros__parameters:
-
-    # ---- TOPICS (Must match the Python Code!) ----
-    imu_diff_topic: "/imu/diff"   # <--- CHANGED THIS FROM imu_topic
-    ekf_odom_topic: "/odometry/ekf"
+    port: "/dev/ttyUSB1"
+    baud: 115200
+    frame_id: "gnss_link"
     
-    odom_frame: "odom"           # <--- CHANGED FROM odom_frame_id (matches my code)
-    base_frame: "base_link"      # <--- CHANGED FROM base_frame_id (matches my code)
+    # Map Origin (Set to your test field center)
+    origin_lat: 19.076090  
+    origin_lon: 72.877426
+    origin_alt: 0.0
 
-    # ---- INITIAL COVARIANCE (px, py, yaw, v) ----
-    initial_covariance: [10.0, 10.0, 0.5, 5.0]
+# --- 2. IMU BRIDGE ---
+/imu_bridge:
+  ros__parameters:
+    port: "/dev/ttyUSB0"
+    baud: 115200
+    frequency: 100.0
+    frame_id: "imu_link"
+    
+    # Toggle this if you switch to BNO085 hardware
+    use_bno085: false 
 
-    # ---- PROCESS NOISE (px, py, yaw, v) ----
-    Q_process: [0.5, 0.5, 0.02, 1.0]
+# --- 3. EKF ESTIMATOR ---
+/ekf_node:
+  ros__parameters:
+    # -- TOPICS --
+    topic_imu: "/imu/data_raw"
+    topic_gps: "/gps/enu_pose"
+    topic_odom: "/odom"
+    topic_lidar: "/lidar_odom"
 
-    # ---- MEASUREMENT NOISE ----
-    R_gps: [5.0, 5.0]
-    R_speed: 0.5
+    # -- FRAMES --
+    odom_frame: "odom"
+    base_frame: "base_link"
+
+    # -- INITIAL UNCERTAINTY (P Matrix) --
+    initial_covariance: [10.0, 10.0, 0.5, 5.0, 1.0]
+
+    # -- PROCESS NOISE (Q Matrix) --
+    # (High values = Trust sensors more than model)
+    process_noise: [0.5, 0.5, 0.02, 1.0, 0.1]
+
+    # -- MEASUREMENT NOISE (R Matrices) --
+    
+    # GNSS Position Noise (Std Dev)
+    gps_pos_noise: 2.23      
+    
+    # Wheel Velocity Noise
+    # YOUR VALUE: 0.5
+    wheel_vel_noise: 0.5    
+
+    # IMU Gyro Noise (New param, default conservative)
+    imu_gyro_noise: 0.05   
+
+    # LiDAR Noise
+    lidar_vel_noise: 0.05   
+
+    # -- THRESHOLDS --
+    gps_outlier_threshold: 3.0
+    max_gps_rejections: 10

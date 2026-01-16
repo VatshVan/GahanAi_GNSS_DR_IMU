@@ -4,3 +4,7 @@ state_estimator/log
 state_estimator/install
 state_estimator/resource
 state_estimator/log
+build/
+install/
+log/
+state_estimator/src/test_sim/
