@@ -181,7 +181,6 @@ class EKFNode(Node):
     def __init__(self):
         super().__init__('ekf_node')
         
-        # 1. PARAMETER DECLARATION (Matches YAML)
         self.declare_parameters(namespace='', parameters=[
             ('topic_imu', '/imu/data_raw'),
             ('topic_gps', '/gps/enu_pose'),
@@ -195,23 +194,23 @@ class EKFNode(Node):
             ('wheel_vel_noise', 0.1),
             ('imu_gyro_noise', 0.01),
             ('lidar_vel_noise', 0.01),
-            ('gps_outlier_threshold', 3.0),
+            # INCREASED GATE: Accommodate Side Slip (Physical Model Mismatch)
+            ('gps_outlier_threshold', 10.0), 
             ('max_gps_rejections', 10),
         ])
 
-        # 2. INIT EKF CORE
         self.ekf = EKF()
         self.ekf.setup_matrices(
             self.get_parameter('initial_covariance').value,
             self.get_parameter('process_noise').value
         )
         
-        # Cache Config
         self.R_gps = self.get_parameter('gps_pos_noise').value
         self.R_wheel = self.get_parameter('wheel_vel_noise').value
         self.R_imu = self.get_parameter('imu_gyro_noise').value
         self.R_lidar = self.get_parameter('lidar_vel_noise').value
         self.gps_thresh = self.get_parameter('gps_outlier_threshold').value
+        self.max_rejects = self.get_parameter('max_gps_rejections').value
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
 
@@ -219,19 +218,15 @@ class EKFNode(Node):
         self.gps_reject_count = 0
         self.filter_ready = False
 
-        # 3. SUBSCRIBERS
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10)
-        
         self.create_subscription(Imu, self.get_parameter('topic_imu').value, self.cb_imu, qos)
         self.create_subscription(Odometry, self.get_parameter('topic_odom').value, self.cb_wheel, qos)
         self.create_subscription(Odometry, self.get_parameter('topic_lidar').value, self.cb_lidar, qos)
         self.create_subscription(PoseWithCovarianceStamped, self.get_parameter('topic_gps').value, self.cb_gps, qos)
 
-        # 4. PUBLISHERS
         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 10)
         self.tf = TransformBroadcaster(self)
-        
-        self.get_logger().info("EKF INITIALIZED with YAML Params.")
+        self.get_logger().info("EKF STARTED: Fusing IMU (Gyro+Head) + GPS + Wheel.")
 
     def cb_wheel(self, msg):
         if not self.filter_ready: return
@@ -249,44 +244,50 @@ class EKFNode(Node):
             self.ekf.state[0] = x
             self.ekf.state[1] = y
             self.filter_ready = True
-            self.get_logger().info(f"EKF GPS INIT: {x:.2f}, {y:.2f}")
+            self.get_logger().info(f"GPS INIT: {x:.2f}, {y:.2f}")
             return
 
-        # Outlier Gate
-        if self.ekf.check_gate(x, y, self.gps_thresh) or self.gps_reject_count > self.get_parameter('max_gps_rejections').value:
-            if not self.ekf.check_gate(x, y, self.gps_thresh): self.gps_reject_count = 0
+        # Gate Logic
+        if self.ekf.check_gate(x, y, self.gps_thresh):
+            # Normal Update: Valid GPS
             self.ekf.update_gps(x, y, self.R_gps)
+            self.gps_reject_count = 0
         else:
+            # Outlier Logic
             self.gps_reject_count += 1
+            if self.gps_reject_count > self.max_rejects:
+                # Force Reset: We are lost.
+                self.get_logger().warn("GPS RESET: Too many rejections. Forcing update.")
+                self.gps_reject_count = 0
+                self.ekf.reset_covariance() # CRITICAL FIX: Explode P so we accept the jump
+                self.ekf.update_gps(x, y, self.R_gps)
 
     def cb_imu(self, msg):
-        # Yaw Init
+        q = msg.orientation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        current_yaw = atan2(siny, cosy)
+
         if not self.ekf.is_yaw_initialized:
-            q = msg.orientation
-            siny = 2.0 * (q.w * q.z + q.x * q.y)
-            cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-            self.ekf.state[2] = atan2(siny, cosy)
+            self.ekf.state[2] = current_yaw
             self.ekf.is_yaw_initialized = True
+            self.get_logger().info("YAW INITIALIZED.")
 
         if not self.filter_ready: return
 
-        # DT
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self.last_msg_time is None: self.last_msg_time = now; return
         dt = now - self.last_msg_time
         self.last_msg_time = now
         if dt <= 0: return
 
-        # Predict & Update
         self.ekf.predict(dt)
         self.ekf.update_imu(msg.angular_velocity.z, self.R_imu)
-
-        # Publish
+        self.ekf.update_heading(current_yaw, 0.05) 
         self.publish_odometry(msg.header.stamp)
 
     def publish_odometry(self, stamp):
         s = self.ekf.state
-        
         t = TransformStamped()
         t.header.stamp = stamp
         t.header.frame_id = self.odom_frame

@@ -106,107 +106,83 @@
 
 """
 Extended Kalman Filter (EKF) Core
----------------------------------
-Professional 5-DOF State Estimator.
-Math engine only. No ROS dependencies.
+Hybrid Version: Supports GNSS + IMU (Gyro+Compass) + Wheel + (Optional) Lidar
 """
 import numpy as np
-from math import sin, cos, sqrt, pi
+from math import sin, cos, atan2, sqrt, pi
 
 def normalize_angle(a):
     return (a + pi) % (2 * pi) - pi
 
 class EKF:
     def __init__(self):
-        # State: [x, y, yaw, v, yaw_rate]
         self.state = np.zeros(5)
-        
-        # Matrices (Initialized to Identity, overridden by ROS Node)
         self.P = np.eye(5)
         self.Q = np.eye(5)
-
         self.is_yaw_initialized = False
 
     def setup_matrices(self, p_diag, q_diag):
-        """Called by ROS Node to set tuning params from YAML."""
         self.P = np.diag(p_diag)
         self.Q = np.diag(q_diag)
+    
+    def reset_covariance(self):
+        """Explode uncertainty to force the filter to jump to new GPS."""
+        self.P *= 10.0 
 
     def predict(self, dt):
-        """Prediction Step (Motion Model)."""
         x, y, yaw, v, yaw_rate = self.state
-
-        # Physics Model
         yaw_new = normalize_angle(yaw + yaw_rate * dt)
         x_new = x + v * cos(yaw) * dt
         y_new = y + v * sin(yaw) * dt
         
-        # Jacobian (F)
         F = np.eye(5)
-        F[0, 2] = -v * sin(yaw) * dt
-        F[0, 3] = cos(yaw) * dt
-        F[1, 2] = v * cos(yaw) * dt
-        F[1, 3] = sin(yaw) * dt
+        F[0, 2] = -v * sin(yaw) * dt; F[0, 3] = cos(yaw) * dt
+        F[1, 2] = v * cos(yaw) * dt;  F[1, 3] = sin(yaw) * dt
         
-        # Covariance Update
         self.P = F @ self.P @ F.T + self.Q * dt
         self.state = np.array([x_new, y_new, yaw_new, v, yaw_rate])
 
     def correct(self, z, R, update_vector):
-        """Generic Measurement Update."""
-        # Find which indices we are updating (e.g., [4] for IMU)
         idxs = [i for i, val in enumerate(update_vector) if val]
         if not idxs: return
 
-        z_sub = z[idxs]
-        x_sub = self.state[idxs]
-        
-        # Create Measurement Matrix H (Maps full state to measurement)
+        z_sub = z[idxs]; x_sub = self.state[idxs]
         H = np.zeros((len(idxs), 5))
-        for i, original_idx in enumerate(idxs):
-            H[i, original_idx] = 1.0
+        for i, original_idx in enumerate(idxs): H[i, original_idx] = 1.0
             
         y = z_sub - x_sub
         if 2 in idxs: y[idxs.index(2)] = normalize_angle(y[idxs.index(2)])
 
         try:
-            # FIX WAS HERE: R needs to be sliced using the same indices
-            # So R passed in MUST be 5x5
             S = H @ self.P @ H.T + R[np.ix_(idxs, idxs)]
             K = self.P @ H.T @ np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            return # Matrix singular, skip update
+        except np.linalg.LinAlgError: return
 
         self.state += K @ y
         self.state[2] = normalize_angle(self.state[2])
-        I = np.eye(5)
-        self.P = (I - K @ H) @ self.P
-
-    # --- SENSOR INTERFACES (FIXED R MATRIX CREATION) ---
+        self.P = (np.eye(5) - K @ H) @ self.P
 
     def update_gps(self, x, y, noise_std):
         z = np.zeros(5); z[0] = x; z[1] = y
-        # FIX: Create full 5x5 matrix
-        R = np.zeros((5,5))
-        R[0,0] = noise_std**2
-        R[1,1] = noise_std**2
+        R = np.zeros((5,5)); R[0,0] = noise_std**2; R[1,1] = noise_std**2
         self.correct(z, R, [True, True, False, False, False])
 
     def update_velocity(self, speed, noise_std, is_lidar=False):
         z = np.zeros(5); z[3] = speed
-        # FIX: Create full 5x5 matrix
-        R = np.zeros((5,5))
-        R[3,3] = noise_std**2
+        R = np.zeros((5,5)); R[3,3] = noise_std**2
         self.correct(z, R, [False, False, False, True, False])
 
     def update_imu(self, yaw_rate, noise_std):
         z = np.zeros(5); z[4] = yaw_rate
-        # FIX: Create full 5x5 matrix so R[4,4] exists
-        R = np.zeros((5,5))
-        R[4,4] = noise_std**2
+        R = np.zeros((5,5)); R[4,4] = noise_std**2
         self.correct(z, R, [False, False, False, False, True])
+    
+    def update_heading(self, yaw, noise_std):
+        z = np.zeros(5); z[2] = yaw
+        R = np.zeros((5,5)); R[2,2] = noise_std**2
+        self.correct(z, R, [False, False, True, False, False])
 
     def check_gate(self, x, y, threshold):
-        dx = x - self.state[0]
-        dy = y - self.state[1]
-        return sqrt(dx*dx + dy*dy) < threshold
+        return sqrt((x - self.state[0])**2 + (y - self.state[1])**2) < threshold
+
+    def get_current_state(self): return self.state
