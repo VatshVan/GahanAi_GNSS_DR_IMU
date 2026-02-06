@@ -67,6 +67,12 @@ class EKF:
         self.state[2] = normalize_angle(self.state[2])
         self.P = (np.eye(5) - K @ H) @ self.P
 
+    def update_velocity(self, v, noise):
+        """Allows for future encoder or GPS SOG integration"""
+        z, R = np.zeros(5), np.zeros((5,5))
+        z[3], R[3,3] = v, noise**2
+        self.correct(z, R, [False, False, False, True, False])
+
     def update_imu_absolute(self, yaw, noise):
         z, R = np.zeros(5), np.zeros((5,5))
         z[2], R[2,2] = yaw, noise**2

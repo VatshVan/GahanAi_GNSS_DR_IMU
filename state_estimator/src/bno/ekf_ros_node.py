@@ -24,7 +24,7 @@ class EKFNode(Node):
         self.sub_gps = self.create_subscription(PoseWithCovarianceStamped, '/gps/enu_pose', self.cb_gps, qos)
         
         self.pub_odom = self.create_publisher(Odometry, '/odometry/ekf', 10)
-        self.tf_br = TransformBroadcaster(self)
+        self.tf_broadcaster = TransformBroadcaster(self)
 
     def cb_gps(self, msg):
         x, y = msg.pose.pose.position.x, msg.pose.pose.position.y
@@ -65,7 +65,7 @@ class EKFNode(Node):
         self.ekf.update_imu_absolute(current_yaw, self.R_imu_base * r_scale)
         self.ekf.update_imu_velocity(msg.angular_velocity.z, self.R_imu_base)
         
-        self.publish_odom(msg.header.stamp)
+        self.publish_odometry(msg.header.stamp)
 
     def publish_odometry(self, stamp):
         s = self.ekf.state
